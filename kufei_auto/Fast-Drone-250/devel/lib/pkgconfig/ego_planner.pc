@@ -1,8 +1,0 @@
-prefix=/home/lyx/kufei_auto/Fast-Drone-250/devel
-
-Name: ego_planner
-Description: Description of ego_planner
-Version: 0.0.0
-Cflags: -I/home/lyx/kufei_auto/Fast-Drone-250/src/planner/plan_manage/include
-Libs: -L${prefix}/lib -lego_planner
-Requires: plan_env path_searching bspline_opt traj_utils

@@ -1,8 +1,0 @@
-prefix=/home/lyx/kufei_auto/Fast-Drone-250/install
-
-Name: mission_auto_avoid
-Description: Description of mission_auto_avoid
-Version: 0.0.1
-Cflags: 
-Libs: -L${prefix}/lib 
-Requires: 
