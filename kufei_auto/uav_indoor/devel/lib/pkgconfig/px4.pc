@@ -1,8 +1,0 @@
-prefix=/home/lyx/kufei_auto/uav_indoor/devel
-
-Name: px4
-Description: Description of px4
-Version: 0.0.0
-Cflags: 
-Libs: -L${prefix}/lib 
-Requires: 

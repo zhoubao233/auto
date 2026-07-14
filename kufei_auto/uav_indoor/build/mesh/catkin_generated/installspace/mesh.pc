@@ -1,8 +1,0 @@
-prefix=/home/lyx/kufei_auto/uav_indoor/install
-
-Name: mesh
-Description: Description of mesh
-Version: 0.0.0
-Cflags: -I${prefix}/include
-Libs: -L${prefix}/lib -lmesh
-Requires: roscpp std_msgs message_runtime

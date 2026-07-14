@@ -1,8 +1,0 @@
-prefix=/home/lyx/kufei_auto/uav_indoor/devel
-
-Name: mesh
-Description: Description of mesh
-Version: 0.0.0
-Cflags: -I/home/lyx/kufei_auto/uav_indoor/devel/include -I/home/lyx/kufei_auto/uav_indoor/src/mesh/include
-Libs: -L${prefix}/lib -lmesh
-Requires: roscpp std_msgs message_runtime

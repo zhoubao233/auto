@@ -1,2 +1,0 @@
-FAST-LIVO2:camera_stream:livox_ros_driver2:mesh:px4:rpg_vikit/vikit_common:rpg_vikit/vikit_py:rpg_vikit/vikit_ros:test:usb_cam:workspace
--DCATKIN_DEVEL_PREFIX=/home/lyx/kufei_auto/uav_indoor/devel -DCMAKE_INSTALL_PREFIX=/home/lyx/kufei_auto/uav_indoor/install -G Unix Makefiles
