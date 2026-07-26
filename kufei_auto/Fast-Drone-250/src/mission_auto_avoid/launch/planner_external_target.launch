@@ -62,7 +62,7 @@
     <arg name="planning_horizon" value="$(arg planning_horizon)" />
     <arg name="use_distinctive_trajs" value="$(arg use_distinctive_trajs)" />
     <arg name="planning_enabled_on_start" value="$(arg planning_enabled_on_start)" />
-    <arg name="use_dynamic_drone_occupancy" value="$(arg use_dynamic_drone_occupancy)"/>
+    <!-- <arg name="use_dynamic_drone_occupancy" value="$(arg use_dynamic_drone_occupancy)"/> -->
 
     <arg name="flight_type" value="4" />
 

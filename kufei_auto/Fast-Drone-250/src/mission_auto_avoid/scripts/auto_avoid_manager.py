@@ -685,9 +685,24 @@ class AutoAvoidManager:
             return
 
         self._publish_goal(target, goal_kind="waypoint")
+        # 规划器停止输出后，判断飞机是否已经稳定到达最后设定点
+        last_cmd = self.last_planner_cmd_msg
+        terminal_hold_ready = (
+            last_cmd is not None
+            and self._distance(
+                self._odom_position(),
+                (
+                    last_cmd.position.x,
+                    last_cmd.position.y,
+                    last_cmd.position.z,
+                ),
+            ) <= 0.3
+            and self._odom_speed() <= 0.2
+        )
+
         auto_resume_ready = (
             clear_ahead
-            and planner_cmd_valid
+            and (planner_cmd_valid or terminal_hold_ready)
             and self.planner_validated_for_exit
             and exit_current_clearance_safe
             and rospy.Time.now() - self.avoidance_start_time >= self.avoidance_min_duration

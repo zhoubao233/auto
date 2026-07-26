@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<launch>
+    <arg name="livox_topic" default="/livox/lidar" />
+    <arg name="odom_topic" default="/mavros/local_position/odom" />
+    <arg name="output_frame" default="world" />
+    <arg name="time_sync_window" default="0.1" />
+
+    <!-- Sensor-to-body extrinsic; angles are degrees, translation is metres. -->
+    <arg name="lidar_x" default="0.0" />
+    <arg name="lidar_y" default="0.0" />
+    <arg name="lidar_z" default="0.0" />
+    <arg name="lidar_roll_deg" default="0.0" />
+    <arg name="lidar_pitch_deg" default="0.0" />
+    <arg name="lidar_yaw_deg" default="0.0" />
+
+    <!-- Body self-point exclusion box in base_link coordinates. -->
+    <arg name="self_filter_enabled" default="true" />
+    <arg name="self_filter_x" default="0.85" />
+    <arg name="self_filter_y" default="0.85" />
+    <arg name="self_filter_z" default="0.6" />
+
+    <node name="livox_to_world" pkg="test" type="livox_to_world"
+          output="screen">
+        <param name="livox_topic" value="$(arg livox_topic)" />
+        <param name="odom_topic" value="$(arg odom_topic)" />
+        <param name="output_frame" value="$(arg output_frame)" />
+        <param name="time_sync_window" value="$(arg time_sync_window)" />
+
+        <param name="lidar_x" value="$(arg lidar_x)" />
+        <param name="lidar_y" value="$(arg lidar_y)" />
+        <param name="lidar_z" value="$(arg lidar_z)" />
+        <param name="lidar_roll_deg" value="$(arg lidar_roll_deg)" />
+        <param name="lidar_pitch_deg" value="$(arg lidar_pitch_deg)" />
+        <param name="lidar_yaw_deg" value="$(arg lidar_yaw_deg)" />
+
+        <param name="self_filter_enabled"
+               value="$(arg self_filter_enabled)" />
+        <param name="self_filter_x" value="$(arg self_filter_x)" />
+        <param name="self_filter_y" value="$(arg self_filter_y)" />
+        <param name="self_filter_z" value="$(arg self_filter_z)" />
+    </node>
+</launch>

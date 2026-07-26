@@ -1,0 +1,13 @@
+--- shfiles/record_mission_auto_avoid.sh
++++ shfiles/record_mission_auto_avoid.sh
+@@ -25,5 +25,10 @@
+   /livox/lidar
+   /world_cloud
+   /ego_input_target
+   /position_cmd
++  /mavros/setpoint_raw/local
++  /drone_0_planning/bspline
++  /drone_0_ego_planner_node/planning/data_display
++  /drone_0_ego_planner_node/grid_map/occupancy
++  /drone_0_ego_planner_node/grid_map/occupancy_inflate
+   /mission_auto_avoid/avoidance_active

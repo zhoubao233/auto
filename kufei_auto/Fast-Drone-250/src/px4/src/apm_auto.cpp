@@ -329,17 +329,17 @@ void safe_check_Callback(const ros::TimerEvent& event)
     {
         case 0:
             send_setpoint_enable = false;
-            if (current_state.mode != loiter_mode_name)
-            {
-                mode_check_flag = 1;
-                offb_set_mode.request.custom_mode = loiter_mode_name;
-                if (set_mode_client.call(offb_set_mode) && offb_set_mode.response.mode_sent)
-                    ROS_INFO_THROTTLE(2, "Attempting to switch FCU to %s.", loiter_mode_name.c_str());
-            }
-            else
-            {
+            // if (current_state.mode != loiter_mode_name)
+            // {
+            //     mode_check_flag = 1;
+            //     offb_set_mode.request.custom_mode = loiter_mode_name;
+            //     if (set_mode_client.call(offb_set_mode) && offb_set_mode.response.mode_sent)
+            //         ROS_INFO_THROTTLE(2, "Attempting to switch FCU to %s.", loiter_mode_name.c_str());
+            // }
+            // else
+            // {
                 mode_check_flag = 0;
-            }
+            // }
             break;
 
         case 1:
@@ -411,14 +411,14 @@ void safe_check_Callback(const ros::TimerEvent& event)
 
 void mode_check_Callback(const ros::TimerEvent& event)
 {
-    static uint16_t rc_data_channel5_last = 0;
+    static uint16_t rc_data_channel6_last = 0;
 
-    // 检测 ch5 是否有变化
-    if (!((rc_data.channels[4] > rc_data_channel5_last - 20) &&
-          (rc_data.channels[4] < rc_data_channel5_last + 20)))
+    // 检测 ch6 是否有变化
+    if (!((rc_data.channels[5] > rc_data_channel6_last - 20) &&
+          (rc_data.channels[5] < rc_data_channel6_last + 20)))
     {
-        ROS_INFO("mode change detected (ch5 changed from %d to %d)",
-                 rc_data_channel5_last, rc_data.channels[4]);
+        ROS_INFO("mode change detected (ch6 changed from %d to %d)",
+                 rc_data_channel6_last, rc_data.channels[5]);
 
         local_pose_data_last.position.x = local_pose_data.pose.position.x;
         local_pose_data_last.position.y = local_pose_data.pose.position.y;
@@ -430,7 +430,7 @@ void mode_check_Callback(const ros::TimerEvent& event)
             holdCurrentPoseLocked();
         }
 
-        if (rc_data.channels[4] >= 1850)
+        if (rc_data.channels[5] >= 1850)
         {
             mode_select_flag = 1;
             offb_set_mode.request.custom_mode = auto_mode_name;
@@ -470,18 +470,18 @@ void mode_check_Callback(const ros::TimerEvent& event)
         fightarea_check_flag = 0;
     }
 
-    rc_data_channel5_last = rc_data.channels[4];
+    rc_data_channel6_last = rc_data.channels[5];
 
-    // 通道6解锁/上锁
-    if (rc_data.channels[5] >= 1850)
+    // 通道10解锁/上锁
+    if (rc_data.channels[9] >= 1850)
         arm_select_flag = 0;
     else
         arm_select_flag = 1;
 
-    ROS_INFO_THROTTLE(1, "arm:%d mode:%d send:%d avoid:%d ch5=%d ch6=%d",
+    ROS_INFO_THROTTLE(1, "arm:%d mode:%d send:%d avoid:%d ch6=%d ch10=%d",
                       arm_select_flag, mode_select_flag, send_setpoint_enable,
                       avoidance_enabled.load() ? 1 : 0,
-                      rc_data.channels[4], rc_data.channels[5]);
+                      rc_data.channels[5], rc_data.channels[9]);
     publish_mode_select_flag();
 }
 

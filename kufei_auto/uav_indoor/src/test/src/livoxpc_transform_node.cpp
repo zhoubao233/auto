@@ -1,5 +1,3 @@
-/*点云预处理*/
-
 #include <iostream>
 #include <vector>
 #include <ros/ros.h>
@@ -32,23 +30,20 @@ ros::Publisher test_pub;
 ros::Publisher test2_pub;
 // 定义同步策略，设置时间窗口为0.1秒
 using namespace message_filters;
-typedef sync_policies::ApproximateTime<livox_ros_driver2::CustomMsg, nav_msgs::Odometry> MySyncPolicy;
+typedef sync_policies::ApproximateTime<sensor_msgs::PointCloud2, nav_msgs::Odometry> MySyncPolicy;
 // typedef sync_policies::ExactTime<livox_ros_driver2::CustomMsg, nav_msgs::Odometry> MySyncPolicy;
 
 // 将livox自定义点映射到 PCL 点
-void convertToPCL(const livox_ros_driver2::CustomMsg::ConstPtr &msg, pcl::PointCloud<pcl::PointXYZL>::Ptr &pcl_cloud)
+// 将原来的函数改为：
+void convertToPCL(const sensor_msgs::PointCloud2::ConstPtr &msg, 
+                  pcl::PointCloud<pcl::PointXYZL>::Ptr &pcl_cloud)
 {
-    for (const auto &p : msg->points)
-    {
-        pcl::PointXYZL pcl_point;
-        pcl_point.x = p.x;
-        pcl_point.y = p.y;
-        pcl_point.z = p.z;
-        // pcl_point.label = p.offset_time;  // 保留偏移时间
-        pcl_cloud->points.push_back(pcl_point);
-    }
+    pcl::PointCloud<pcl::PointXYZL> temp_cloud;
+    pcl::fromROSMsg(*msg, temp_cloud);
+    *pcl_cloud += temp_cloud;
+    
     pcl_cloud->width = pcl_cloud->points.size();
-    pcl_cloud->height = 1;  // 设置为1以表示无结构的点云
+    pcl_cloud->height = 1;
     pcl_cloud->is_dense = true;
 }
 
@@ -147,13 +142,13 @@ void pcfilter(pcl::PointCloud<pcl::PointXYZL>::Ptr& latestCloud , pcl::PointClou
     // 创建条件
     pcl::ConditionOr<pcl::PointXYZL> condition;
     condition.addComparison(pcl::FieldComparison<pcl::PointXYZL>::ConstPtr(
-        new pcl::FieldComparison<pcl::PointXYZL>("x", pcl::ComparisonOps::GT, 0.3))); // X大于1
+        new pcl::FieldComparison<pcl::PointXYZL>("x", pcl::ComparisonOps::GT, 1.7))); // X大于1
     condition.addComparison(pcl::FieldComparison<pcl::PointXYZL>::ConstPtr(
-        new pcl::FieldComparison<pcl::PointXYZL>("x", pcl::ComparisonOps::LT, -0.3))); // X小于-1
+        new pcl::FieldComparison<pcl::PointXYZL>("x", pcl::ComparisonOps::LT, -1.7))); // X小于-1
     condition.addComparison(pcl::FieldComparison<pcl::PointXYZL>::ConstPtr(
-        new pcl::FieldComparison<pcl::PointXYZL>("y", pcl::ComparisonOps::GT, 0.3))); // Y大于1
+        new pcl::FieldComparison<pcl::PointXYZL>("y", pcl::ComparisonOps::GT, 1.7))); // Y大于1
     condition.addComparison(pcl::FieldComparison<pcl::PointXYZL>::ConstPtr(
-        new pcl::FieldComparison<pcl::PointXYZL>("y", pcl::ComparisonOps::LT, -0.3))); // Y小于-1
+        new pcl::FieldComparison<pcl::PointXYZL>("y", pcl::ComparisonOps::LT, -1.7))); // Y小于-1
 
     // 应用条件过滤器
     pcl::ConditionalRemoval<pcl::PointXYZL> filter;
@@ -180,7 +175,7 @@ void pcfilter(pcl::PointCloud<pcl::PointXYZL>::Ptr& latestCloud , pcl::PointClou
     // pass.filter(*filtered_cloud);
 }
 
-void callback(const livox_ros_driver2::CustomMsg::ConstPtr &pc, const nav_msgs::OdometryConstPtr& odom) {
+void callback(const sensor_msgs::PointCloud2::ConstPtr &pc, const nav_msgs::OdometryConstPtr& odom) {
     pcl::PointCloud<pcl::PointXYZL>::Ptr latestCloud(new pcl::PointCloud<pcl::PointXYZL>());
     pcl::PointCloud<pcl::PointXYZL>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZL>);
     convertToPCL(pc, latestCloud);
@@ -231,9 +226,9 @@ void callback(const livox_ros_driver2::CustomMsg::ConstPtr &pc, const nav_msgs::
     // std::cout<<"end"<<std::endl;
 }
 
-void testcallback(const livox_ros_driver2::CustomMsg::ConstPtr &pc){
-    std::cout<<pc->header.stamp<<std::endl;
-}
+// void testcallback(const livox_ros_driver2::CustomMsg::ConstPtr &pc){
+//     std::cout<<pc->header.stamp<<std::endl;
+// }
 
 // 主程序示例
 int main(int argc, char** argv)
@@ -242,7 +237,7 @@ int main(int argc, char** argv)
     ros::NodeHandle nh;
 
     std::string odometry_topic_name , pointcloud_topic_name;
-    nh.param<std::string>("odometry_topic", odometry_topic_name, "/aft_mapped_to_init" );
+    nh.param<std::string>("odometry_topic", odometry_topic_name, "/mavros/local_position/odom" );
     nh.param<std::string>("pointcloud_topic", pointcloud_topic_name, "/livox/lidar" );
 
     PCbuffer.reset(new pcl::PointCloud<pcl::PointXYZL>());
@@ -255,7 +250,7 @@ int main(int argc, char** argv)
     // ros::Subscriber sub=nh.subscribe("/livox/lidar",1,testcallback);
 
     // 创建消息订阅者
-    message_filters::Subscriber<livox_ros_driver2::CustomMsg> pc_sub(nh, pointcloud_topic_name , 50);
+    message_filters::Subscriber<sensor_msgs::PointCloud2> pc_sub(nh, pointcloud_topic_name , 50);
     message_filters::Subscriber<nav_msgs::Odometry> odom_sub(nh, odometry_topic_name , 50);
     // message_filters::Subscriber<nav_msgs::Odometry> odom_sub(nh, "/mavros/local_position/odom" , 5);
     // message_filters::Subscriber<nav_msgs::Odometry> odom_sub(nh, "/Odometry" , 5);
@@ -263,7 +258,7 @@ int main(int argc, char** argv)
     // Synchronizer<MySyncPolicy> sync(MySyncPolicy(10), pc_sub, odom_sub);
     // sync.registerCallback(boost::bind(&callback, _1, _2));
     message_filters::Synchronizer<MySyncPolicy> sync(MySyncPolicy(10), pc_sub, odom_sub);
-    sync.setInterMessageLowerBound(ros::Duration(0, 200000000));  // 设置时间窗口, 0.1秒
+    sync.setInterMessageLowerBound(ros::Duration(0, 200000000));  // 设置时间窗口, 0.2秒
     sync.registerCallback(boost::bind(&callback, _1, _2));
     std::cout << "wait for callback " << std::endl;
 
