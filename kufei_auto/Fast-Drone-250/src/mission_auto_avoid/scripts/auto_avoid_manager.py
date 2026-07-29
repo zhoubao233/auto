@@ -197,6 +197,8 @@ class AutoAvoidManager:
         self.avoidance_goal_released = False
         self.last_forced_goal_time = rospy.Time(0)
         self.resume_mode = None
+        self.pending_resume_mode = None
+        self.pending_resume_reason = None
         self.mode_select_flag = None
         self.fcu_origin = None
         self.fcu_home_position = None
@@ -478,6 +480,14 @@ class AutoAvoidManager:
 
         now = rospy.Time.now()
         if not self._guided_requests_allowed():
+            if self.pending_resume_mode is not None:
+                rospy.logwarn(
+                    "mission_auto_avoid: cancel pending resume to %s because /mode_select_flag=%s requests LOITER/manual control.",
+                    self.pending_resume_mode,
+                    str(self.mode_select_flag),
+                )
+                self.pending_resume_mode = None
+                self.pending_resume_reason = None
             self.planner_cmd_valid_pub.publish(Bool(False))
             self.auto_resume_ready_pub.publish(Bool(False))
             if self.avoidance_active:
@@ -508,6 +518,8 @@ class AutoAvoidManager:
             return
 
         self._sync_planning_enabled()
+        if self._handle_pending_resume():
+            return
         self._try_set_auto_on_start()
 
         target = self._current_target_waypoint()
@@ -1174,13 +1186,55 @@ class AutoAvoidManager:
 
     def _exit_avoidance(self, reason):
         resume_mode = self.resume_mode or self.auto_mode
+        self.pending_resume_mode = resume_mode
+        self.pending_resume_reason = reason
         self.avoidance_active_pub.publish(Bool(False))
         if resume_mode == self.auto_mode:
-            self._maybe_sync_fcu_current_before_auto_resume()
+            waypoint_advanced = self._advance_fcu_current_if_target_reached()
+            if not waypoint_advanced:
+                self._maybe_sync_fcu_current_before_auto_resume()
         self._request_mode(resume_mode)
         self._reset_avoidance_state()
 
-        rospy.logwarn("mission_auto_avoid: avoidance finished, switch back to %s (%s).", resume_mode, reason)
+        if self.state_msg is not None and self.state_msg.mode == resume_mode:
+            self.pending_resume_mode = None
+            self.pending_resume_reason = None
+            rospy.logwarn(
+                "mission_auto_avoid: avoidance finished, FCU already confirmed mode %s (%s).",
+                resume_mode,
+                reason,
+            )
+        else:
+            rospy.logwarn(
+                "mission_auto_avoid: avoidance path finished, requested mode %s and waiting for FCU confirmation (%s).",
+                resume_mode,
+                reason,
+            )
+
+    def _handle_pending_resume(self):
+        if self.pending_resume_mode is None:
+            return False
+
+        resume_mode = self.pending_resume_mode
+        reason = self.pending_resume_reason or "unknown"
+        if self.state_msg is not None and self.state_msg.mode == resume_mode:
+            self.pending_resume_mode = None
+            self.pending_resume_reason = None
+            rospy.logwarn(
+                "mission_auto_avoid: FCU confirmed resume mode %s after avoidance (%s).",
+                resume_mode,
+                reason,
+            )
+            return False
+
+        self._request_mode(resume_mode)
+        rospy.logwarn_throttle(
+            1.0,
+            "mission_auto_avoid: waiting for FCU to confirm resume mode %s; mode request will be retried (current=%s).",
+            resume_mode,
+            self.state_msg.mode if self.state_msg is not None else "unknown",
+        )
+        return True
 
     def _guided_requests_allowed(self):
         return self.mode_select_flag is not None and self.mode_select_flag != 0
@@ -1371,6 +1425,17 @@ class AutoAvoidManager:
             return self.auto_mode
 
         current_mode = str(self.state_msg.mode).strip()
+        if self._is_return_mode(current_mode):
+            return current_mode
+
+        if self._guided_requests_allowed():
+            if current_mode != self.auto_mode:
+                rospy.logwarn(
+                    "mission_auto_avoid: mission switch is AUTO/GUIDED while FCU mode is %s; avoidance will resume AUTO.",
+                    current_mode,
+                )
+            return self.auto_mode
+
         if current_mode == self.guided_mode:
             return self.auto_mode
 
@@ -1387,6 +1452,77 @@ class AutoAvoidManager:
         current_pos = self._odom_position()
         # Preserve current altitude during avoidance; FCU resumes its own RTL/RTN profile after GUIDED exits.
         return (self.fcu_home_position[0], self.fcu_home_position[1], current_pos[2])
+
+    def _advance_fcu_current_if_target_reached(self):
+        if (
+            self.mission_source != "fcu"
+            or not self._fcu_mission_ready()
+            or self.set_current_client is None
+            or self.fcu_current_target_seq is None
+            or self._is_return_mode(self.state_msg.mode if self.state_msg is not None else None)
+        ):
+            return False
+
+        target_seq = int(self.fcu_current_target_seq)
+        current_seq = int(self.fcu_waypoint_list.current_seq)
+        if current_seq > target_seq:
+            return True
+
+        target_waypoint = next(
+            (waypoint for waypoint in self.fcu_nav_waypoints if waypoint["seq"] == target_seq),
+            None,
+        )
+        if target_waypoint is None or target_waypoint["command"] != self.MAV_CMD_NAV_WAYPOINT:
+            return False
+
+        distance = self._distance(self._odom_position(), target_waypoint["point"])
+        if distance > self.fcu_set_current_dist_threshold:
+            rospy.loginfo(
+                "mission_auto_avoid: keep FCU mission seq %d before AUTO resume because target distance %.2f m exceeds %.2f m.",
+                current_seq,
+                distance,
+                self.fcu_set_current_dist_threshold,
+            )
+            return False
+
+        next_seq = target_seq + 1
+        mission_count = len(self.fcu_waypoint_list.waypoints)
+        if next_seq >= mission_count:
+            rospy.loginfo(
+                "mission_auto_avoid: reached final FCU mission waypoint seq %d; let FCU finish the mission in AUTO.",
+                target_seq,
+            )
+            return False
+
+        try:
+            rospy.wait_for_service(self.fcu_set_current_service, timeout=1.0)
+            response = self.set_current_client(wp_seq=next_seq)
+        except (rospy.ROSException, rospy.ServiceException) as exc:
+            rospy.logwarn(
+                "mission_auto_avoid: failed to advance FCU mission seq %d -> %d before AUTO resume: %s",
+                current_seq,
+                next_seq,
+                exc,
+            )
+            return False
+
+        if not response.success:
+            rospy.logwarn(
+                "mission_auto_avoid: FCU rejected mission advance seq %d -> %d before AUTO resume.",
+                current_seq,
+                next_seq,
+            )
+            return False
+
+        self.fcu_waypoint_list.current_seq = next_seq
+        rospy.logwarn(
+            "mission_auto_avoid: GUIDED reached FCU waypoint seq %d (distance=%.2f m); advanced mission current_seq %d -> %d before AUTO resume.",
+            target_seq,
+            distance,
+            current_seq,
+            next_seq,
+        )
+        return True
 
     def _maybe_sync_fcu_current_before_auto_resume(self):
         if (
