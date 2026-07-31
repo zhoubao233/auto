@@ -24,6 +24,11 @@
   <arg name="planar_entry_tolerance" default="0.05"/>
   <arg name="planar_entry_max_vz" default="0.10"/>
   <arg name="planar_z_epsilon" default="0.0001"/>
+  <arg name="lambda_smooth" default="1.0"/>
+  <arg name="lambda_collision" default="1.0"/>
+  <arg name="lambda_feasibility" default="0.2"/>
+  <arg name="lambda_fitness" default="1.0"/>
+  <arg name="dist0" default="0.5"/>
 
   <arg name="point_num" default="1" />
   <arg name="point0_x" default="15.0" />
@@ -70,6 +75,11 @@
     <arg name="planar_entry_tolerance" value="$(arg planar_entry_tolerance)"/>
     <arg name="planar_entry_max_vz" value="$(arg planar_entry_max_vz)"/>
     <arg name="planar_z_epsilon" value="$(arg planar_z_epsilon)"/>
+    <arg name="lambda_smooth" value="$(arg lambda_smooth)"/>
+    <arg name="lambda_collision" value="$(arg lambda_collision)"/>
+    <arg name="lambda_feasibility" value="$(arg lambda_feasibility)"/>
+    <arg name="lambda_fitness" value="$(arg lambda_fitness)"/>
+    <arg name="dist0" value="$(arg dist0)"/>
 
     <arg name="flight_type" value="4" />
 

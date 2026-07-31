@@ -21,6 +21,11 @@
   <arg name="planar_entry_tolerance" default="0.05"/>
   <arg name="planar_entry_max_vz" default="0.10"/>
   <arg name="planar_z_epsilon" default="0.0001"/>
+  <arg name="lambda_smooth" default="1.0"/>
+  <arg name="lambda_collision" default="1.0"/>
+  <arg name="lambda_feasibility" default="0.2"/>
+  <arg name="lambda_fitness" default="1.0"/>
+  <arg name="dist0" default="0.5"/>
 
   <arg name="point_num"/>
   <arg name="point0_x"/>
@@ -143,11 +148,11 @@
     <param name="manager/planar_z_epsilon" value="$(arg planar_z_epsilon)" type="double"/>
 
   <!-- trajectory optimization -->
-    <param name="optimization/lambda_smooth" value="1.0" type="double"/>
-    <param name="optimization/lambda_collision" value="1" type="double"/>
-    <param name="optimization/lambda_feasibility" value="0.2" type="double"/>
-    <param name="optimization/lambda_fitness" value="1.0" type="double"/>
-    <param name="optimization/dist0" value="0.5" type="double"/>
+    <param name="optimization/lambda_smooth" value="$(arg lambda_smooth)" type="double"/>
+    <param name="optimization/lambda_collision" value="$(arg lambda_collision)" type="double"/>
+    <param name="optimization/lambda_feasibility" value="$(arg lambda_feasibility)" type="double"/>
+    <param name="optimization/lambda_fitness" value="$(arg lambda_fitness)" type="double"/>
+    <param name="optimization/dist0" value="$(arg dist0)" type="double"/>
     <param name="optimization/swarm_clearance" value="0.5" type="double"/>
     <param name="optimization/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="optimization/max_acc" value="$(arg max_acc)" type="double"/>

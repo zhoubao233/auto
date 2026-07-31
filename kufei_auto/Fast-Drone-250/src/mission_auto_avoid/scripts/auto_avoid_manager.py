@@ -350,6 +350,7 @@ class AutoAvoidManager:
             float(msg.position.y),
             float(msg.position.z),
         )
+        self._refresh_fcu_nav_waypoints()
 
     def _fcu_waypoint_list_callback(self, msg):
         self.fcu_waypoint_list = msg
@@ -447,7 +448,13 @@ class AutoAvoidManager:
             return None
 
         if waypoint.frame in self.SUPPORTED_FCU_RELATIVE_ALT_FRAMES:
-            altitude = float(waypoint.z_alt)
+            if self.fcu_home_position is None:
+                rospy.logwarn_throttle(
+                    1.0,
+                    "mission_auto_avoid: waiting for FCU HOME before converting relative altitude.",
+                )
+                return None
+            altitude = float(self.fcu_home_position[2]) + float(waypoint.z_alt)
         elif waypoint.frame in self.SUPPORTED_FCU_ABSOLUTE_ALT_FRAMES:
             altitude = float(waypoint.z_alt) - float(self.fcu_origin[2])
         else:
