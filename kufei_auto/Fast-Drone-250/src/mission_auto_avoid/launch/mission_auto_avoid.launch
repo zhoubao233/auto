@@ -6,7 +6,12 @@
   <arg name="map_size_y" default="400"/>
   <arg name="map_size_z" default="7"/>
 
+  <!-- Raw FCU odometry remains available to the manager and cloud converter. -->
   <arg name="odom_topic" default="/mavros/local_position/odom"/>
+  <!-- EGO expects linear velocity in world axes, unlike MAVROS odom twist. -->
+  <arg name="planner_odom_topic" default="/ego/odom_world_velocity"/>
+  <arg name="enable_odom_velocity_adapter" default="true"/>
+  <arg name="odom_twist_in_body_frame" default="true"/>
   <arg name="use_airsim_bridge" default="false"/>
   <arg name="input_cloud_topic" default="/airsim_node/Copter/lidar/Lidar1"/>
   <arg name="lidar_world_topic" default="/world_cloud"/>
@@ -29,9 +34,14 @@
 
   <arg name="max_vel" default="1.0" />
   <arg name="max_acc" default="2.0" />
+  <arg name="acceleration_ff_scale" default="1.0" />
   <arg name="planning_horizon" default="6" />
   <arg name="use_distinctive_trajs" default="false" />
   <arg name="planning_enabled_on_start" default="false" />
+  <arg name="use_2d_astar" default="false"/>
+  <arg name="planar_entry_tolerance" default="0.05"/>
+  <arg name="planar_entry_max_vz" default="0.10"/>
+  <arg name="planar_z_epsilon" default="0.0001"/>
 
   <arg name="point_num" default="1" />
   <arg name="point0_x" default="15.0" />
@@ -138,13 +148,21 @@
     <arg name="sensor_yaw_deg" value="$(arg lidar_yaw)"/>
   </include>
 
+  <!-- Convert MAVROS child-frame twist into world-frame twist for EGO only. -->
+  <include if="$(arg enable_odom_velocity_adapter)"
+           file="$(find mission_auto_avoid)/launch/odom_velocity_to_world.launch">
+    <arg name="input_odom_topic" value="$(arg odom_topic)"/>
+    <arg name="output_odom_topic" value="$(arg planner_odom_topic)"/>
+    <arg name="input_twist_in_body_frame" value="$(arg odom_twist_in_body_frame)"/>
+  </include>
+
   <include file="$(find mission_auto_avoid)/launch/planner_external_target.launch">
     <arg name="drone_id" value="$(arg drone_id)"/>
     <arg name="obj_num" value="$(arg obj_num)"/>
     <arg name="map_size_x" value="$(arg map_size_x)"/>
     <arg name="map_size_y" value="$(arg map_size_y)"/>
     <arg name="map_size_z" value="$(arg map_size_z)"/>
-    <arg name="odom_topic" value="$(arg odom_topic)"/>
+    <arg name="odom_topic" value="$(arg planner_odom_topic)"/>
     <arg name="cloud_topic" value="$(arg lidar_world_topic)"/>
     <arg name="use_dynamic_drone_occupancy" value="false"/>
     <arg name="cx" value="$(arg cx)"/>
@@ -156,6 +174,10 @@
     <arg name="planning_horizon" value="$(arg planning_horizon)"/>
     <arg name="use_distinctive_trajs" value="$(arg use_distinctive_trajs)"/>
     <arg name="planning_enabled_on_start" value="$(arg planning_enabled_on_start)"/>
+    <arg name="use_2d_astar" value="$(arg use_2d_astar)"/>
+    <arg name="planar_entry_tolerance" value="$(arg planar_entry_tolerance)"/>
+    <arg name="planar_entry_max_vz" value="$(arg planar_entry_max_vz)"/>
+    <arg name="planar_z_epsilon" value="$(arg planar_z_epsilon)"/>
     <arg name="point_num" value="$(arg point_num)"/>
     <arg name="point0_x" value="$(arg point0_x)"/>
     <arg name="point0_y" value="$(arg point0_y)"/>
@@ -180,6 +202,8 @@
   <param name="loiter_mode" value="$(arg loiter_mode)" />
   <param name="avoidance_enable_topic" value="$(arg avoidance_flag_topic)" />
   <param name="avoidance_takeover_max_setpoint_jump" value="$(arg avoidance_takeover_max_setpoint_jump)" />
+  <param name="acceleration_ff_scale" value="$(arg acceleration_ff_scale)" />
+
 
   <include file="$(find px4)/launch/apm_auto.launch" />
 

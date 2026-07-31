@@ -45,7 +45,13 @@ namespace ego_planner
     double getSwarmClearance(void) { return bspline_optimizer_->getSwarmClearance(); }
 
     bool checkCollision(int drone_id);
-    
+
+    void setPlanarLockZ(double waypoint_z);
+    bool planarModeEnabled() const { return use_2d_astar_; }
+    bool planarLockValid() const { return planar_lock_valid_; }
+    double planarLockZ() const { return planar_lock_z_; }
+    double planarEntryTolerance() const { return planar_entry_tolerance_; }
+    double planarEntryMaxVz() const { return planar_entry_max_vz_; }
 
     PlanParameters pp_;
     LocalTrajData local_data_;
@@ -63,8 +69,15 @@ namespace ego_planner
     BsplineOptimizer::Ptr bspline_optimizer_;
 
     int continous_failures_count_{0};
+    bool use_2d_astar_{false};
+    bool planar_lock_valid_{false};
+    double planar_lock_z_{0.0};
+    double planar_entry_tolerance_{0.05};
+    double planar_entry_max_vz_{0.10};
+    double planar_z_epsilon_{0.0001};
 
     void updateTrajInfo(const UniformBspline &position_traj, const ros::Time time_now);
+    bool validatePlanarTrajectory(UniformBspline trajectory) const;
 
     void reparamBspline(UniformBspline &bspline, vector<Eigen::Vector3d> &start_end_derivative, double ratio, Eigen::MatrixXd &ctrl_pts, double &dt,
                         double &time_inc);

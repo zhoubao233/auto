@@ -20,6 +20,10 @@
   <arg name="planning_horizon" default="6" />
   <arg name="use_distinctive_trajs" default="false" />
   <arg name="planning_enabled_on_start" default="true" />
+  <arg name="use_2d_astar" default="false"/>
+  <arg name="planar_entry_tolerance" default="0.05"/>
+  <arg name="planar_entry_max_vz" default="0.10"/>
+  <arg name="planar_z_epsilon" default="0.0001"/>
 
   <arg name="point_num" default="1" />
   <arg name="point0_x" default="15.0" />
@@ -62,7 +66,10 @@
     <arg name="planning_horizon" value="$(arg planning_horizon)" />
     <arg name="use_distinctive_trajs" value="$(arg use_distinctive_trajs)" />
     <arg name="planning_enabled_on_start" value="$(arg planning_enabled_on_start)" />
-    <!-- <arg name="use_dynamic_drone_occupancy" value="$(arg use_dynamic_drone_occupancy)"/> -->
+    <arg name="use_2d_astar" value="$(arg use_2d_astar)"/>
+    <arg name="planar_entry_tolerance" value="$(arg planar_entry_tolerance)"/>
+    <arg name="planar_entry_max_vz" value="$(arg planar_entry_max_vz)"/>
+    <arg name="planar_z_epsilon" value="$(arg planar_z_epsilon)"/>
 
     <arg name="flight_type" value="4" />
 

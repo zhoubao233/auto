@@ -68,6 +68,8 @@ namespace ego_planner
 
     /* planning data */
     bool have_trigger_, have_target_, have_odom_, have_new_target_, have_recv_pre_agent_;
+    bool have_pending_planar_target_{false};
+    Eigen::Vector3d pending_planar_target_{Eigen::Vector3d::Zero()};
 
     // 新增：调试用的话题状态标志
     bool have_broadcast_bspline_, have_waypoint_msg_, have_external_target_;

@@ -103,6 +103,12 @@ namespace ego_planner
     void setBsplineInterval(const double &ts);
     void setSwarmTrajs(SwarmTrajData *swarm_trajs_ptr);
     void setDroneId(const int drone_id);
+    void setPlanarMode(bool enabled, double lock_z)
+    {
+      use_planar_lock_ = enabled;
+      planar_lock_z_ = lock_z;
+      enforcePlanarLock();
+    }
 
     // optional inputs
     void setGuidePath(const vector<Eigen::Vector3d> &guide_pt);
@@ -176,6 +182,10 @@ namespace ego_planner
     double min_ellip_dist_;
 
     ControlPoints cps_;
+    bool use_planar_lock_{false};
+    double planar_lock_z_{0.0};
+
+    void enforcePlanarLock();
 
     /* cost function */
     /* calculate each part of cost function with control points q as input */

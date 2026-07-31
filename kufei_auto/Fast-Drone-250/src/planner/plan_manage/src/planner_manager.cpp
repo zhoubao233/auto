@@ -1,5 +1,7 @@
 // #include <fstream>
 #include <plan_manage/planner_manager.h>
+#include <algorithm>
+#include <cmath>
 #include <thread>
 #include "visualization_msgs/Marker.h" // zx-todo
 
@@ -24,6 +26,16 @@ namespace ego_planner
     nh.param("manager/planning_horizon", pp_.planning_horizen_, 5.0);
     nh.param("manager/use_distinctive_trajs", pp_.use_distinctive_trajs, false);
     nh.param("manager/drone_id", pp_.drone_id, -1);
+    nh.param("manager/use_2d_astar", use_2d_astar_, false);
+    nh.param("manager/planar_entry_tolerance", planar_entry_tolerance_, 0.05);
+    nh.param("manager/planar_entry_max_vz", planar_entry_max_vz_, 0.10);
+    nh.param("manager/planar_z_epsilon", planar_z_epsilon_, 0.0001);
+
+    planar_entry_tolerance_ = std::max(0.0, planar_entry_tolerance_);
+    planar_entry_max_vz_ = std::max(0.0, planar_entry_max_vz_);
+    planar_z_epsilon_ = std::max(0.0, planar_z_epsilon_);
+
+    ROS_WARN("Planar waypoint lock: %s", use_2d_astar_ ? "ON" : "OFF");
 
     local_data_.traj_id_ = 0;
     grid_map_.reset(new GridMap);
@@ -42,6 +54,13 @@ namespace ego_planner
     visualization_ = vis;
   }
 
+  void EGOPlannerManager::setPlanarLockZ(double waypoint_z)
+  {
+    planar_lock_z_ = waypoint_z;
+    planar_lock_valid_ = true;
+    ROS_WARN("Planar lock updated from waypoint: z=%.3f", planar_lock_z_);
+  }
+
   // !SECTION
 
   // SECTION rebond replanning
@@ -55,6 +74,24 @@ namespace ego_planner
     // cout.precision(3);
     // cout << "start: " << start_pt.transpose() << ", " << start_vel.transpose() << "\ngoal:" << local_target_pt.transpose() << ", " << local_target_vel.transpose()
     //      << endl;
+
+    if (use_2d_astar_)
+    {
+      if (!planar_lock_valid_)
+      {
+        ROS_ERROR("Planar lock height is not set.");
+        continous_failures_count_++;
+        return false;
+      }
+
+      start_pt(2) = planar_lock_z_;
+      local_target_pt(2) = planar_lock_z_;
+      start_vel(2) = 0.0;
+      start_acc(2) = 0.0;
+      local_target_vel(2) = 0.0;
+    }
+
+    bspline_optimizer_->setPlanarMode(use_2d_astar_, planar_lock_z_);
 
     if ((start_pt - local_target_pt).norm() < 0.2)
     {
@@ -98,8 +135,16 @@ namespace ego_planner
           Eigen::Vector3d horizen_dir = ((start_pt - local_target_pt).cross(Eigen::Vector3d(0, 0, 1))).normalized();
           Eigen::Vector3d vertical_dir = ((start_pt - local_target_pt).cross(horizen_dir)).normalized();
           Eigen::Vector3d random_inserted_pt = (start_pt + local_target_pt) / 2 +
-                                               (((double)rand()) / RAND_MAX - 0.5) * (start_pt - local_target_pt).norm() * horizen_dir * 0.8 * (-0.978 / (continous_failures_count_ + 0.989) + 0.989) +
-                                               (((double)rand()) / RAND_MAX - 0.5) * (start_pt - local_target_pt).norm() * vertical_dir * 0.4 * (-0.978 / (continous_failures_count_ + 0.989) + 0.989);
+                                               (((double)rand()) / RAND_MAX - 0.5) * (start_pt - local_target_pt).norm() * horizen_dir * 0.8 * (-0.978 / (continous_failures_count_ + 0.989) + 0.989);
+          if (!use_2d_astar_)
+          {
+            random_inserted_pt +=
+                (((double)rand()) / RAND_MAX - 0.5) * (start_pt - local_target_pt).norm() * vertical_dir * 0.4 * (-0.978 / (continous_failures_count_ + 0.989) + 0.989);
+          }
+          else
+          {
+            random_inserted_pt(2) = planar_lock_z_;
+          }
           Eigen::MatrixXd pos(3, 3);
           pos.col(0) = start_pt;
           pos.col(1) = random_inserted_pt;
@@ -217,6 +262,8 @@ namespace ego_planner
 
     Eigen::MatrixXd ctrl_pts, ctrl_pts_temp;
     UniformBspline::parameterizeToBspline(ts, point_set, start_end_derivatives, ctrl_pts);
+    if (use_2d_astar_)
+      ctrl_pts.row(2).setConstant(planar_lock_z_);
 
     vector<std::pair<int, int>> segments;
     segments = bspline_optimizer_->initControlPoints(ctrl_pts, true);
@@ -325,6 +372,12 @@ namespace ego_planner
 
     t_refine = ros::Time::now() - t_start;
 
+    if (!validatePlanarTrajectory(pos))
+    {
+      continous_failures_count_++;
+      return false;
+    }
+
     // save planned results
     updateTrajInfo(pos, ros::Time::now());
 
@@ -339,8 +392,31 @@ namespace ego_planner
     return true;
   }
 
+  bool EGOPlannerManager::validatePlanarTrajectory(UniformBspline trajectory) const
+  {
+    if (!use_2d_astar_)
+      return true;
+
+    const Eigen::MatrixXd ctrl_pts = trajectory.getControlPoint();
+    for (int i = 0; i < ctrl_pts.cols(); ++i)
+    {
+      const double z = ctrl_pts(2, i);
+      if (!std::isfinite(z) || std::fabs(z - planar_lock_z_) > planar_z_epsilon_)
+      {
+        ROS_ERROR("Reject non-planar trajectory: cp=%d z=%.9f lock_z=%.9f",
+                  i, z, planar_lock_z_);
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   bool EGOPlannerManager::EmergencyStop(Eigen::Vector3d stop_pos)
   {
+    if (use_2d_astar_ && planar_lock_valid_)
+      stop_pos(2) = planar_lock_z_;
+
     Eigen::MatrixXd control_points(3, 6);
     for (int i = 0; i < 6; i++)
     {

@@ -17,6 +17,10 @@ TOPICS=(
   /mavros/state
   /mavros/local_position/odom
   /mavros/local_position/pose
+  /mavros/local_position/velocity_local
+  /mavros/local_position/velocity_body
+  /mavros/imu/data
+  /ego/odom_world_velocity
   /mavros/rc/in
   /mavros/setpoint_raw/local
   /mavros/mission/waypoints

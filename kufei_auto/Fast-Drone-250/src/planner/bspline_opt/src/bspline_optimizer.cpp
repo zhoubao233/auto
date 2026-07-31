@@ -31,9 +31,20 @@ namespace ego_planner
     this->moving_objs_ = mov_obj;
   }
 
+  void BsplineOptimizer::enforcePlanarLock()
+  {
+    if (use_planar_lock_ &&
+        cps_.points.rows() == 3 &&
+        cps_.points.cols() > 0)
+    {
+      cps_.points.row(2).setConstant(planar_lock_z_);
+    }
+  }
+
   void BsplineOptimizer::setControlPoints(const Eigen::MatrixXd &points)
   {
     cps_.points = points;
+    enforcePlanarLock();
   }
 
   void BsplineOptimizer::setBsplineInterval(const double &ts) { bspline_interval_ = ts; }
@@ -439,6 +450,7 @@ namespace ego_planner
       cps_.clearance = dist0_;
       cps_.resize(init_points.cols());
       cps_.points = init_points;
+      enforcePlanarLock();
     }
 
     /*** Segment the initial trajectory according to obstacles ***/
@@ -517,7 +529,11 @@ namespace ego_planner
     {
       //cout << "in=" << in.transpose() << " out=" << out.transpose() << endl;
       Eigen::Vector3d in(init_points.col(segment_ids[i].first)), out(init_points.col(segment_ids[i].second));
-      if (a_star_->AstarSearch(/*(in-out).norm()/10+0.05*/ 0.1, in, out))
+      if (a_star_->AstarSearch(/*(in-out).norm()/10+0.05*/ 0.1,
+                               in,
+                               out,
+                               use_planar_lock_,
+                               planar_lock_z_))
       {
         a_star_pathes.push_back(a_star_->getPath());
       }
@@ -1275,7 +1291,11 @@ namespace ego_planner
       {
         /*** a star search ***/
         Eigen::Vector3d in(cps_.points.col(segment_ids[i].first)), out(cps_.points.col(segment_ids[i].second));
-        if (a_star_->AstarSearch(/*(in-out).norm()/10+0.05*/ 0.1, in, out))
+        if (a_star_->AstarSearch(/*(in-out).norm()/10+0.05*/ 0.1,
+                                 in,
+                                 out,
+                                 use_planar_lock_,
+                                 planar_lock_z_))
         {
           a_star_pathes.push_back(a_star_->getPath());
         }
@@ -1409,6 +1429,7 @@ namespace ego_planner
     setBsplineInterval(ts);
 
     cps_ = control_points;
+    enforcePlanarLock();
 
     bool flag_success = rebound_optimize(final_cost);
 
@@ -1454,6 +1475,7 @@ namespace ego_planner
       flag_occ = false;
       success = false;
 
+      enforcePlanarLock();
       double q[variable_num_];
       memcpy(q, cps_.points.data() + 3 * start_id, variable_num_ * sizeof(q[0]));
 
@@ -1606,6 +1628,7 @@ namespace ego_planner
     int end_id = this->cps_.points.cols() - order_;
     variable_num_ = 3 * (end_id - start_id);
 
+    enforcePlanarLock();
     double q[variable_num_];
     double final_cost;
 
@@ -1677,6 +1700,7 @@ namespace ego_planner
     // cout << "sizeof(x[0])=" << sizeof(x[0]) << endl;
 
     memcpy(cps_.points.data() + 3 * order_, x, n * sizeof(x[0]));
+    enforcePlanarLock();
 
     /* ---------- evaluate cost and gradient ---------- */
     double f_smoothness, f_distance, f_feasibility /*, f_mov_objs*/, f_swarm, f_terminal;
@@ -1700,6 +1724,10 @@ namespace ego_planner
     //printf("origin %f %f %f %f\n", f_smoothness, f_distance, f_feasibility, f_combine);
 
     Eigen::MatrixXd grad_3D = lambda1_ * g_smoothness + new_lambda2_ * g_distance + lambda3_ * g_feasibility + new_lambda2_ * g_swarm + lambda2_ * g_terminal;
+    if (use_planar_lock_)
+    {
+      grad_3D.row(2).setZero();
+    }
     //Eigen::MatrixXd grad_3D = lambda1_ * g_smoothness + new_lambda2_ * g_distance + lambda3_ * g_feasibility + new_lambda2_ * g_mov_objs;
     memcpy(grad, grad_3D.data() + 3 * order_, n * sizeof(grad[0]));
   }
@@ -1708,6 +1736,7 @@ namespace ego_planner
   {
 
     memcpy(cps_.points.data() + 3 * order_, x, n * sizeof(x[0]));
+    enforcePlanarLock();
 
     /* ---------- evaluate cost and gradient ---------- */
     double f_smoothness, f_fitness, f_feasibility;
@@ -1727,6 +1756,10 @@ namespace ego_planner
     // printf("origin %f %f %f %f\n", f_smoothness, f_fitness, f_feasibility, f_combine);
 
     Eigen::MatrixXd grad_3D = lambda1_ * g_smoothness + lambda4_ * g_fitness + lambda3_ * g_feasibility;
+    if (use_planar_lock_)
+    {
+      grad_3D.row(2).setZero();
+    }
     memcpy(grad, grad_3D.data() + 3 * order_, n * sizeof(grad[0]));
   }
 

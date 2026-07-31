@@ -118,13 +118,24 @@ bool AStar::ConvertToIndexAndAdjustStartEndPoints(Vector3d start_pt, Vector3d en
     return true;
 }
 
-bool AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d end_pt)
+bool AStar::AstarSearch(const double step_size,
+                        Vector3d start_pt,
+                        Vector3d end_pt,
+                        bool planar_2d,
+                        double planar_z)
 {
     ros::Time time_1 = ros::Time::now();
     ++rounds_;
 
     step_size_ = step_size;
     inv_step_size_ = 1 / step_size;
+
+    if (planar_2d)
+    {
+        start_pt(2) = planar_z;
+        end_pt(2) = planar_z;
+    }
+
     center_ = (start_pt + end_pt) / 2;
 
     Vector3i start_idx, end_idx;
@@ -179,9 +190,12 @@ bool AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d end_
         }
         current->state = GridNode::CLOSEDSET; //move current node from open set to closed set.
 
+        const int dz_min = planar_2d ? 0 : -1;
+        const int dz_max = planar_2d ? 0 : 1;
+
         for (int dx = -1; dx <= 1; dx++)
             for (int dy = -1; dy <= 1; dy++)
-                for (int dz = -1; dz <= 1; dz++)
+                for (int dz = dz_min; dz <= dz_max; dz++)
                 {
                     if (dx == 0 && dy == 0 && dz == 0)
                         continue;

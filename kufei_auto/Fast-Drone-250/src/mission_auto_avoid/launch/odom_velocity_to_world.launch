@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- MAVROS odom input. Its twist is normally expressed in base_link axes. -->
+  <arg name="input_odom_topic" default="/mavros/local_position/odom"/>
+
+  <!-- EGO compatibility output: pose unchanged, twist rotated to world axes. -->
+  <arg name="output_odom_topic" default="/ego/odom_world_velocity"/>
+
+  <!-- Set false when the input odometry already contains world-frame twist. -->
+  <arg name="input_twist_in_body_frame" default="true"/>
+  <arg name="queue_size" default="10"/>
+
+  <node pkg="mission_auto_avoid"
+        type="odom_velocity_to_world"
+        name="odom_velocity_to_world"
+        output="screen">
+    <param name="input_odom_topic" value="$(arg input_odom_topic)"/>
+    <param name="output_odom_topic" value="$(arg output_odom_topic)"/>
+    <param name="input_twist_in_body_frame" value="$(arg input_twist_in_body_frame)"/>
+    <param name="queue_size" value="$(arg queue_size)"/>
+  </node>
+</launch>

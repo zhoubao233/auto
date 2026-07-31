@@ -109,6 +109,10 @@ static bool avoidance_activation_has_control_traj_id = false;
 static uint32_t control_planner_traj_id = 0;
 static uint32_t avoidance_activation_control_traj_id = 0;
 static double avoidance_takeover_max_setpoint_jump = 1.0;
+static double control_cmd_timeout = 0.2;
+static double acceleration_ff_scale = 1.0;
+static bool received_ego_control_cmd = false;
+static ros::Time last_ego_control_cmd_time;
 static std::string guided_mode_name = "GUIDED";
 static std::string auto_mode_name = "AUTO";
 static std::string loiter_mode_name = "LOITER";
@@ -151,7 +155,7 @@ void apply_rc_override_to_effective_input()
     }
 }
 
-void holdCurrentPoseLocked()
+void holdCurrentPoseLocked()/* 让飞机飞向最近一次缓存的当前位置，并在那个点悬停 */
 {
     if (received_local_pose)
     {
@@ -164,6 +168,9 @@ void holdCurrentPoseLocked()
     control_data.velocity.x = 0.0;
     control_data.velocity.y = 0.0;
     control_data.velocity.z = 0.0;
+    control_data.acceleration_or_force.x = 0.0;
+    control_data.acceleration_or_force.y = 0.0;
+    control_data.acceleration_or_force.z = 0.0;
     control_data.type_mask = command_position_pose.type_mask;
 }
 
@@ -171,6 +178,8 @@ void resetAvoidanceTakeoverStateLocked()
 {
     waiting_for_avoidance_traj = false;
     avoidance_activation_has_control_traj_id = false;
+    received_ego_control_cmd = false;
+    last_ego_control_cmd_time = ros::Time(0);
 }
 
 void armIfRequested()
@@ -236,13 +245,15 @@ void avoidanceEnableCallback(const std_msgs::Bool::ConstPtr& msg)
         waiting_for_avoidance_traj = true;
         avoidance_activation_has_control_traj_id = have_control_planner_traj_id;
         avoidance_activation_control_traj_id = control_planner_traj_id;
-        holdCurrentPoseLocked();
+        received_ego_control_cmd = false;
+        last_ego_control_cmd_time = ros::Time(0);
+        holdCurrentPoseLocked();// 当前实现：锁定最近一次缓存位置
         ROS_WARN("Avoidance enabled. Holding current pose until a fresh planner trajectory is received.");
     }
     else if (!msg->data && was_enabled)
     {
-        resetAvoidanceTakeoverStateLocked();
-        holdCurrentPoseLocked();
+        resetAvoidanceTakeoverStateLocked();// 清除“等待新避障轨迹”的状态
+        holdCurrentPoseLocked();// 当前实现：锁定最近一次缓存位置
         ROS_INFO("Avoidance disabled. Holding current pose until FCU leaves GUIDED.");
     }
 }
@@ -280,6 +291,54 @@ int command_position_control(double x, double y, double hight, float yaw)
     command_position_pose.yaw = yaw;
 
     local_pose_vel_pub.publish(command_position_pose);
+    return 1;
+}
+
+/*
+EGO 位置 + 速度 + 加速度前馈控制。
+同一条 PositionTarget 同时启用 XYZ 位置、XYZ 速度、XYZ 加速度和 yaw；
+只忽略 yaw_rate。
+*/
+int command_position_velocity_acceleration_control(
+    double x, double y, double height,
+    double vx, double vy, double vz,
+    double ax, double ay, double az,
+    float yaw)
+{
+    if (height > safe_area_hightmax || fabs(x) > safe_area_xmax || fabs(y) > safe_area_ymax)
+    {
+        ROS_INFO("give position out of the safe_area");
+        return 0;
+    }
+    if (mode_check_flag != 0)
+    {
+        ROS_INFO("mode is not AUTO/GUIDED control mode");
+        return 0;
+    }
+    if (fightarea_check_flag != 0)
+    {
+        ROS_INFO("uav is out of safe_area");
+        local_pose_vel_pub.publish(local_pose_data_boforeOutarea);
+        return 0;
+    }
+
+    mavros_msgs::PositionTarget position_velocity_cmd;
+    position_velocity_cmd.header.stamp = ros::Time::now();
+    position_velocity_cmd.coordinate_frame = mavros_msgs::PositionTarget::FRAME_LOCAL_NED;
+    position_velocity_cmd.type_mask = mavros_msgs::PositionTarget::IGNORE_YAW_RATE;
+
+    position_velocity_cmd.position.x = x;
+    position_velocity_cmd.position.y = y;
+    position_velocity_cmd.position.z = height;
+    position_velocity_cmd.velocity.x = vx;
+    position_velocity_cmd.velocity.y = vy;
+    position_velocity_cmd.velocity.z = vz;
+    position_velocity_cmd.acceleration_or_force.x = ax;
+    position_velocity_cmd.acceleration_or_force.y = ay;
+    position_velocity_cmd.acceleration_or_force.z = az;
+    position_velocity_cmd.yaw = yaw;
+
+    local_pose_vel_pub.publish(position_velocity_cmd);
     return 1;
 }
 
@@ -329,6 +388,7 @@ void safe_check_Callback(const ros::TimerEvent& event)
     {
         case 0:
             send_setpoint_enable = false;
+            /* 避免锁定模式  只有在遥控器通道的时候变化一次*/
             // if (current_state.mode != loiter_mode_name)
             // {
             //     mode_check_flag = 1;
@@ -552,7 +612,12 @@ void EGOControldataCallback(const quadrotor_msgs::PositionCommand::ConstPtr& msg
     control_data.velocity.x = msg->velocity.x;
     control_data.velocity.y = msg->velocity.y;
     control_data.velocity.z = msg->velocity.z;
-    control_data.type_mask = command_position_pose.type_mask;
+    control_data.acceleration_or_force.x = acceleration_ff_scale * msg->acceleration.x;
+    control_data.acceleration_or_force.y = acceleration_ff_scale * msg->acceleration.y;
+    control_data.acceleration_or_force.z = acceleration_ff_scale * msg->acceleration.z;
+    control_data.type_mask = mavros_msgs::PositionTarget::IGNORE_YAW_RATE;
+    received_ego_control_cmd = true;
+    last_ego_control_cmd_time = ros::Time::now();
 
     control_planner_traj_id = msg->trajectory_id;
     have_control_planner_traj_id = true;
@@ -647,6 +712,9 @@ int px4control_init(ros::NodeHandle nh)
     control_data.velocity.x = 0;
     control_data.velocity.y = 0;
     control_data.velocity.z = 0;
+    control_data.acceleration_or_force.x = 0;
+    control_data.acceleration_or_force.y = 0;
+    control_data.acceleration_or_force.z = 0;
 
     /*****相关定时器回调函数定义******************************************************/
     timer_safe_check = nh.createTimer(ros::Duration(0.2), safe_check_Callback);
@@ -674,9 +742,18 @@ int px4control_init(ros::NodeHandle nh)
     nh.param("loiter_mode", loiter_mode_name, std::string("LOITER"));
     nh.param("avoidance_enable_topic", avoidance_enable_topic, std::string("/mission_auto_avoid/avoidance_active"));
     nh.param("avoidance_takeover_max_setpoint_jump", avoidance_takeover_max_setpoint_jump, 1.0);
-    ROS_INFO("guided_mode:%s auto_mode:%s loiter_mode:%s avoidance_enable_topic:%s takeover_jump:%.2f",
+    nh.param("velocity_tracking/cmd_timeout", control_cmd_timeout, 0.2);
+    nh.param("acceleration_ff_scale", acceleration_ff_scale, 1.0);
+    if (acceleration_ff_scale < 0.0)
+    {
+        ROS_WARN("acceleration_ff_scale must be non-negative; clamping %.3f to 0.0",
+                 acceleration_ff_scale);
+        acceleration_ff_scale = 0.0;
+    }
+    ROS_INFO("guided_mode:%s auto_mode:%s loiter_mode:%s avoidance_enable_topic:%s takeover_jump:%.2f cmd_timeout:%.2f acceleration_ff_scale:%.2f",
              guided_mode_name.c_str(), auto_mode_name.c_str(), loiter_mode_name.c_str(),
-             avoidance_enable_topic.c_str(), avoidance_takeover_max_setpoint_jump);
+             avoidance_enable_topic.c_str(), avoidance_takeover_max_setpoint_jump,
+             control_cmd_timeout, acceleration_ff_scale);
 
     /*****初始化一些状态数据**********************************************************/
     fightarea_check_flag = 1;
@@ -772,12 +849,54 @@ void uavcontrol()
             continue;
         }
 
-        std::unique_lock<std::mutex> lock(control_data_mutex);
-        velocity_and_position_limit(control_data);
-        command_position_control(control_data.position.x, control_data.position.y,
-                                 control_data.position.z, control_data.yaw);
-        lock.unlock();
-        ROS_INFO_THROTTLE(1, "give command to uav");
+        const bool use_ego_position_velocity_acceleration =
+            ctrl_mode_flag == EGO_CTRL && plannerControlEnabled();
+
+        mavros_msgs::PositionTarget tracked_cmd;
+        bool command_stale = false;
+        {
+            std::lock_guard<std::mutex> lock(control_data_mutex);
+            tracked_cmd = control_data;
+            command_stale =
+                use_ego_position_velocity_acceleration &&
+                (!received_ego_control_cmd ||
+                 (ros::Time::now() - last_ego_control_cmd_time).toSec() > control_cmd_timeout);
+        }
+
+        velocity_and_position_limit(tracked_cmd);
+
+        if (use_ego_position_velocity_acceleration)
+        {
+            if (command_stale)
+            {
+                tracked_cmd.velocity.x = 0.0;
+                tracked_cmd.velocity.y = 0.0;
+                tracked_cmd.velocity.z = 0.0;
+                tracked_cmd.acceleration_or_force.x = 0.0;
+                tracked_cmd.acceleration_or_force.y = 0.0;
+                tracked_cmd.acceleration_or_force.z = 0.0;
+                ROS_WARN_THROTTLE(
+                    1.0,
+                    "EGO command timeout: keep the last position target and clear velocity/acceleration feed-forward");
+            }
+
+            command_position_velocity_acceleration_control(
+                tracked_cmd.position.x, tracked_cmd.position.y, tracked_cmd.position.z,
+                tracked_cmd.velocity.x, tracked_cmd.velocity.y, tracked_cmd.velocity.z,
+                tracked_cmd.acceleration_or_force.x,
+                tracked_cmd.acceleration_or_force.y,
+                tracked_cmd.acceleration_or_force.z,
+                tracked_cmd.yaw);
+            ROS_INFO_THROTTLE(
+                1,
+                "give EGO position+velocity+acceleration feed-forward command to uav");
+        }
+        else
+        {
+            command_position_control(tracked_cmd.position.x, tracked_cmd.position.y,
+                                     tracked_cmd.position.z, tracked_cmd.yaw);
+            ROS_INFO_THROTTLE(1, "give position command to uav");
+        }
         rate.sleep();
     }
 }
