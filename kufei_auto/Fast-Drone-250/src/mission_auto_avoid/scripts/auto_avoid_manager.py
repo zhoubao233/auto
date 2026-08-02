@@ -202,8 +202,12 @@ class AutoAvoidManager:
         self.fcu_home_position = None
         self.fcu_waypoint_list = None
         self.fcu_nav_waypoints = []
+        self.fcu_takeoff_seq = None
         self.fcu_current_nav_index = None
         self.fcu_current_target_seq = None
+        self.fcu_avoidance_target_point = None
+        self.fcu_avoidance_target_seq = None
+        self.fcu_avoidance_target_nav_index = None
         self.fcu_mission_ready_state = None
 
         self.start_time = rospy.Time.now()
@@ -401,8 +405,19 @@ class AutoAvoidManager:
             return
 
         nav_waypoints = []
+        self.fcu_takeoff_seq = None
         if self.fcu_origin is not None and self.fcu_waypoint_list is not None:
             for seq, waypoint in enumerate(self.fcu_waypoint_list.waypoints):
+                if int(waypoint.command) == self.MAV_CMD_NAV_TAKEOFF:
+                    self.fcu_takeoff_seq = seq
+                    break
+
+            skip_through_seq = self.fcu_takeoff_seq if self.fcu_takeoff_seq is not None else 0
+            for seq, waypoint in enumerate(self.fcu_waypoint_list.waypoints):
+                # HOME and TAKEOFF are handled by the FCU. Obstacle avoidance starts
+                # from the first supported navigation command after TAKEOFF.
+                if seq <= skip_through_seq:
+                    continue
                 point = self._fcu_waypoint_to_local(waypoint)
                 if point is None:
                     continue
@@ -781,6 +796,11 @@ class AutoAvoidManager:
         if self._is_return_mode(self.state_msg.mode if self.state_msg is not None else None):
             return self._current_return_target_waypoint_fcu()
 
+        if self.avoidance_active and self.fcu_avoidance_target_point is not None:
+            self.fcu_current_nav_index = self.fcu_avoidance_target_nav_index
+            self.fcu_current_target_seq = self.fcu_avoidance_target_seq
+            return self.fcu_avoidance_target_point
+
         if not self._fcu_mission_ready():
             rospy.loginfo_throttle(
                 1.0,
@@ -1130,6 +1150,18 @@ class AutoAvoidManager:
             )
             return
 
+        if not self._fcu_auto_target_ready_for_avoidance():
+            return
+
+        if self.mission_source == "fcu" and not self._is_return_mode(self.state_msg.mode):
+            self.fcu_avoidance_target_point = target
+            self.fcu_avoidance_target_seq = self.fcu_current_target_seq
+            self.fcu_avoidance_target_nav_index = self.fcu_current_nav_index
+            rospy.loginfo(
+                "mission_auto_avoid: locked FCU mission target seq=%d for this avoidance session.",
+                self.fcu_avoidance_target_seq,
+            )
+
         self.avoidance_active = True
         self.avoidance_takeover_active = False
         self.avoidance_goal_released = False
@@ -1177,6 +1209,53 @@ class AutoAvoidManager:
     def _guided_requests_allowed(self):
         return self.mode_select_flag is not None and self.mode_select_flag != 0
 
+    def _fcu_auto_target_ready_for_avoidance(self):
+        if self.mission_source != "fcu":
+            return True
+
+        current_mode = self.state_msg.mode if self.state_msg is not None else None
+        if self._is_return_mode(current_mode):
+            return True
+
+        if str(current_mode).strip().upper() != str(self.auto_mode).strip().upper():
+            rospy.loginfo_throttle(
+                1.0,
+                "mission_auto_avoid: obstacle detected, wait for FCU AUTO before GUIDED takeover "
+                "(current mode=%s).",
+                str(current_mode),
+            )
+            return False
+
+        if self.fcu_waypoint_list is None:
+            rospy.loginfo_throttle(
+                1.0,
+                "mission_auto_avoid: obstacle detected in AUTO, wait for FCU mission progress before GUIDED takeover.",
+            )
+            return False
+
+        current_seq = int(self.fcu_waypoint_list.current_seq)
+        first_avoidance_seq = self.fcu_takeoff_seq + 1 if self.fcu_takeoff_seq is not None else 1
+        if current_seq < first_avoidance_seq:
+            rospy.loginfo_throttle(
+                1.0,
+                "mission_auto_avoid: obstacle detected in AUTO, wait for FCU to pass TAKEOFF before GUIDED takeover "
+                "(current_seq=%d, takeoff_seq=%s, required_seq>=%d).",
+                current_seq,
+                str(self.fcu_takeoff_seq),
+                first_avoidance_seq,
+            )
+            return False
+
+        if self.fcu_current_target_seq is None or self.fcu_current_target_seq < current_seq:
+            rospy.loginfo_throttle(
+                1.0,
+                "mission_auto_avoid: wait for a valid FCU navigation target at or after current_seq=%d before GUIDED takeover.",
+                current_seq,
+            )
+            return False
+
+        return True
+
     def _reset_avoidance_state(self):
         self.avoidance_active = False
         self.avoidance_start_time = None
@@ -1195,6 +1274,9 @@ class AutoAvoidManager:
         self.avoidance_goal_released = False
         self.last_forced_goal_time = rospy.Time(0)
         self.resume_mode = None
+        self.fcu_avoidance_target_point = None
+        self.fcu_avoidance_target_seq = None
+        self.fcu_avoidance_target_nav_index = None
 
     def _cancel_avoidance_for_loiter(self):
         self.avoidance_active_pub.publish(Bool(False))
