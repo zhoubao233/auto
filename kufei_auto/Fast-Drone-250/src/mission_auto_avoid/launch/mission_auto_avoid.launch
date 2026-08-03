@@ -107,6 +107,9 @@
   <arg name="clear_hold_time" default="1.0"/>
   <arg name="guided_exit_debounce" default="2.0"/>
   <arg name="guided_hold_speed_threshold" default="0.2"/>
+  <arg name="post_takeoff_settle_time" default="1.0"/>
+  <arg name="post_takeoff_settle_z_tolerance" default="0.4"/>
+  <arg name="post_takeoff_settle_max_vz" default="0.10"/>
   <arg name="planner_cmd_timeout" default="0.5"/>
   <arg name="planner_valid_hold_time" default="1.0"/>
   <arg name="planner_motion_recent_window" default="1.0"/>
@@ -270,6 +273,9 @@
     <param name="clear_hold_time" value="$(arg clear_hold_time)"/>
     <param name="guided_exit_debounce" value="$(arg guided_exit_debounce)"/>
     <param name="guided_hold_speed_threshold" value="$(arg guided_hold_speed_threshold)"/>
+    <param name="post_takeoff_settle_time" value="$(arg post_takeoff_settle_time)"/>
+    <param name="post_takeoff_settle_z_tolerance" value="$(arg post_takeoff_settle_z_tolerance)"/>
+    <param name="post_takeoff_settle_max_vz" value="$(arg post_takeoff_settle_max_vz)"/>
     <param name="planner_cmd_timeout" value="$(arg planner_cmd_timeout)"/>
     <param name="planner_valid_hold_time" value="$(arg planner_valid_hold_time)"/>
     <param name="planner_motion_recent_window" value="$(arg planner_motion_recent_window)"/>

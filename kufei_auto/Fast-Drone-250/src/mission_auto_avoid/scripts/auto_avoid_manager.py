@@ -124,6 +124,17 @@ class AutoAvoidManager:
         self.planner_valid_hold_time = rospy.Duration(rospy.get_param("~planner_valid_hold_time", 1.0))
         self.planner_motion_recent_window = rospy.Duration(rospy.get_param("~planner_motion_recent_window", 1.0))
         self.guided_hold_speed_threshold = float(rospy.get_param("~guided_hold_speed_threshold", 0.2))
+        self.post_takeoff_settle_time = rospy.Duration(
+            max(0.0, float(rospy.get_param("~post_takeoff_settle_time", 1.0)))
+        )
+        self.post_takeoff_settle_z_tolerance = max(
+            0.0,
+            float(rospy.get_param("~post_takeoff_settle_z_tolerance", 0.4)),
+        )
+        self.post_takeoff_settle_max_vz = max(
+            0.0,
+            float(rospy.get_param("~post_takeoff_settle_max_vz", 0.10)),
+        )
         self.planner_cmd_min_speed = rospy.get_param("~planner_cmd_min_speed", 0.15)
         self.planner_cmd_min_acc = rospy.get_param("~planner_cmd_min_acc", 0.2)
         self.planner_cmd_min_pos_error = rospy.get_param("~planner_cmd_min_pos_error", 0.2)
@@ -209,6 +220,8 @@ class AutoAvoidManager:
         self.fcu_avoidance_target_seq = None
         self.fcu_avoidance_target_nav_index = None
         self.fcu_mission_ready_state = None
+        self.post_takeoff_settle_since = None
+        self.post_takeoff_settle_complete = self.mission_source != "fcu"
 
         self.start_time = rospy.Time.now()
         self.waypoints = self._load_waypoints() if self.mission_source == "file" else []
@@ -543,6 +556,8 @@ class AutoAvoidManager:
                 self._exit_avoidance("mission_finished")
             self.rejoin_active = False
             return
+
+        self._update_post_takeoff_settle_state(target)
 
         route_start, route_end = self._current_route_segment(target)
         route_distance, rejoin_target = self._route_distance_and_rejoin_target(route_start, route_end)
@@ -1246,6 +1261,9 @@ class AutoAvoidManager:
             )
             return False
 
+        if current_seq == first_avoidance_seq and not self.post_takeoff_settle_complete:
+            return False
+
         if self.fcu_current_target_seq is None or self.fcu_current_target_seq < current_seq:
             rospy.loginfo_throttle(
                 1.0,
@@ -1255,6 +1273,87 @@ class AutoAvoidManager:
             return False
 
         return True
+
+    def _update_post_takeoff_settle_state(self, target):
+        if self.mission_source != "fcu" or self.fcu_takeoff_seq is None:
+            self.post_takeoff_settle_complete = True
+            self.post_takeoff_settle_since = None
+            return
+
+        if self.fcu_waypoint_list is None or self.state_msg is None:
+            return
+
+        current_seq = int(self.fcu_waypoint_list.current_seq)
+        first_avoidance_seq = self.fcu_takeoff_seq + 1
+
+        if current_seq < first_avoidance_seq:
+            self.post_takeoff_settle_complete = False
+            self.post_takeoff_settle_since = None
+            return
+
+        if current_seq > first_avoidance_seq or self._is_return_mode(self.state_msg.mode):
+            self.post_takeoff_settle_complete = True
+            self.post_takeoff_settle_since = None
+            return
+
+        if self.post_takeoff_settle_complete:
+            return
+
+        if self.post_takeoff_settle_time.to_sec() <= 0.0:
+            self.post_takeoff_settle_complete = True
+            self.post_takeoff_settle_since = None
+            return
+
+        if str(self.state_msg.mode).strip().upper() != str(self.auto_mode).strip().upper():
+            self.post_takeoff_settle_since = None
+            return
+
+        current_z = self._odom_position()[2]
+        current_vz = abs(float(self.odom_msg.twist.twist.linear.z))
+        z_error = abs(current_z - target[2])
+        stable = (
+            z_error <= self.post_takeoff_settle_z_tolerance
+            and current_vz <= self.post_takeoff_settle_max_vz
+        )
+
+        if not stable:
+            self.post_takeoff_settle_since = None
+            rospy.loginfo_throttle(
+                1.0,
+                "mission_auto_avoid: post-TAKEOFF altitude is not stable yet "
+                "(z=%.3f target_z=%.3f error=%.3f/%.3f, |vz|=%.3f/%.3f).",
+                current_z,
+                target[2],
+                z_error,
+                self.post_takeoff_settle_z_tolerance,
+                current_vz,
+                self.post_takeoff_settle_max_vz,
+            )
+            return
+
+        now = rospy.Time.now()
+        if self.post_takeoff_settle_since is None:
+            self.post_takeoff_settle_since = now
+
+        stable_duration = now - self.post_takeoff_settle_since
+        if stable_duration < self.post_takeoff_settle_time:
+            rospy.loginfo_throttle(
+                1.0,
+                "mission_auto_avoid: post-TAKEOFF altitude stable for %.2f/%.2fs before GUIDED takeover.",
+                stable_duration.to_sec(),
+                self.post_takeoff_settle_time.to_sec(),
+            )
+            return
+
+        self.post_takeoff_settle_complete = True
+        self.post_takeoff_settle_since = None
+        rospy.logwarn(
+            "mission_auto_avoid: post-TAKEOFF altitude settled; GUIDED avoidance takeover is now allowed "
+            "(z=%.3f target_z=%.3f |vz|=%.3f).",
+            current_z,
+            target[2],
+            current_vz,
+        )
 
     def _reset_avoidance_state(self):
         self.avoidance_active = False
