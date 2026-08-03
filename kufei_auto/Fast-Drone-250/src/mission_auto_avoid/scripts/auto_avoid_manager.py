@@ -120,6 +120,25 @@ class AutoAvoidManager:
         self.avoidance_min_duration = rospy.Duration(rospy.get_param("~avoidance_min_duration", 2.0))
         self.clear_hold_time = rospy.Duration(rospy.get_param("~clear_hold_time", 1.0))
         self.guided_exit_debounce = rospy.Duration(rospy.get_param("~guided_exit_debounce", 2.0))
+        self.fcu_goal_arrival_exit_hold_time = rospy.Duration(
+            max(0.0, float(rospy.get_param("~fcu_goal_arrival_exit_hold_time", 1.0)))
+        )
+        self.fcu_goal_arrival_exit_xy_tolerance = max(
+            0.0,
+            float(rospy.get_param("~fcu_goal_arrival_exit_xy_tolerance", 0.4)),
+        )
+        self.fcu_goal_arrival_exit_z_tolerance = max(
+            0.0,
+            float(rospy.get_param("~fcu_goal_arrival_exit_z_tolerance", 0.3)),
+        )
+        self.fcu_goal_arrival_exit_max_xy_speed = max(
+            0.0,
+            float(rospy.get_param("~fcu_goal_arrival_exit_max_xy_speed", 0.25)),
+        )
+        self.fcu_goal_arrival_exit_max_vz = max(
+            0.0,
+            float(rospy.get_param("~fcu_goal_arrival_exit_max_vz", 0.15)),
+        )
         self.planner_cmd_timeout = rospy.Duration(rospy.get_param("~planner_cmd_timeout", 0.5))
         self.planner_valid_hold_time = rospy.Duration(rospy.get_param("~planner_valid_hold_time", 1.0))
         self.planner_motion_recent_window = rospy.Duration(rospy.get_param("~planner_motion_recent_window", 1.0))
@@ -202,6 +221,8 @@ class AutoAvoidManager:
         self.planner_validated_for_exit = False
         self.last_planner_motion_time = None
         self.exit_ready_since = None
+        self.fcu_goal_arrival_exit_since = None
+        self.fcu_goal_arrival_exit_ready = False
         self.planning_enabled_state = None
         self.rejoin_active = False
         self.avoidance_takeover_active = False
@@ -639,6 +660,8 @@ class AutoAvoidManager:
                 )
             return
 
+        fcu_goal_arrival_exit_ready = self._update_fcu_goal_arrival_exit(target)
+
         if obstacle_ahead:
             self.clear_since = None
             self.exit_ready_since = None
@@ -722,9 +745,10 @@ class AutoAvoidManager:
             return
 
         self._publish_goal(target, goal_kind="waypoint")
+        planner_or_goal_arrival_ready = planner_cmd_valid or fcu_goal_arrival_exit_ready
         auto_resume_ready = (
             clear_ahead
-            and planner_cmd_valid
+            and planner_or_goal_arrival_ready
             and self.planner_validated_for_exit
             and exit_current_clearance_safe
             and rospy.Time.now() - self.avoidance_start_time >= self.avoidance_min_duration
@@ -736,7 +760,12 @@ class AutoAvoidManager:
                 self.exit_ready_since = rospy.Time.now()
             self.auto_resume_ready_pub.publish(Bool(True))
             if rospy.Time.now() - self.exit_ready_since >= self.guided_exit_debounce:
-                self._exit_avoidance("path_clear_route_rejoined_planner_valid")
+                exit_reason = (
+                    "path_clear_route_rejoined_planner_valid"
+                    if planner_cmd_valid
+                    else "path_clear_route_rejoined_fcu_waypoint_arrived"
+                )
+                self._exit_avoidance(exit_reason)
         else:
             self.exit_ready_since = None
             self.auto_resume_ready_pub.publish(Bool(False))
@@ -744,6 +773,7 @@ class AutoAvoidManager:
                 clear_ahead,
                 route_rejoin_needed,
                 planner_cmd_valid,
+                fcu_goal_arrival_exit_ready,
                 exit_current_clearance_safe,
                 exit_current_clearance,
                 exit_current_clearance_source,
@@ -1084,11 +1114,97 @@ class AutoAvoidManager:
 
         return rospy.Time.now() - self.last_planner_traj_change_time <= self.planner_motion_recent_window
 
+    def _fcu_goal_arrival_exit_eligible(self):
+        if (
+            self.mission_source != "fcu"
+            or not self.avoidance_takeover_active
+            or self.fcu_waypoint_list is None
+            or self.fcu_avoidance_target_seq is None
+            or self.fcu_avoidance_target_nav_index is None
+            or self.state_msg is None
+            or str(self.state_msg.mode).strip().upper() != str(self.guided_mode).strip().upper()
+        ):
+            return False
+
+        nav_index = int(self.fcu_avoidance_target_nav_index)
+        if nav_index < 0 or nav_index >= len(self.fcu_nav_waypoints):
+            return False
+
+        waypoint = self.fcu_nav_waypoints[nav_index]
+        target_seq = int(self.fcu_avoidance_target_seq)
+        return (
+            int(waypoint["seq"]) == target_seq
+            and int(waypoint["command"]) == self.MAV_CMD_NAV_WAYPOINT
+            and int(self.fcu_waypoint_list.current_seq) == target_seq
+        )
+
+    def _update_fcu_goal_arrival_exit(self, target):
+        if not self._fcu_goal_arrival_exit_eligible():
+            self.fcu_goal_arrival_exit_since = None
+            self.fcu_goal_arrival_exit_ready = False
+            return False
+
+        current_pos = self._odom_position()
+        velocity = self.odom_msg.twist.twist.linear
+        xy_error = math.hypot(current_pos[0] - target[0], current_pos[1] - target[1])
+        z_error = abs(current_pos[2] - target[2])
+        xy_speed = math.hypot(float(velocity.x), float(velocity.y))
+        vertical_speed = abs(float(velocity.z))
+        stable = (
+            xy_error <= self.fcu_goal_arrival_exit_xy_tolerance
+            and z_error <= self.fcu_goal_arrival_exit_z_tolerance
+            and xy_speed <= self.fcu_goal_arrival_exit_max_xy_speed
+            and vertical_speed <= self.fcu_goal_arrival_exit_max_vz
+        )
+
+        if not stable:
+            self.fcu_goal_arrival_exit_since = None
+            self.fcu_goal_arrival_exit_ready = False
+            return False
+
+        now = rospy.Time.now()
+        if self.fcu_goal_arrival_exit_since is None:
+            self.fcu_goal_arrival_exit_since = now
+
+        stable_duration = now - self.fcu_goal_arrival_exit_since
+        if stable_duration < self.fcu_goal_arrival_exit_hold_time:
+            rospy.loginfo_throttle(
+                1.0,
+                "mission_auto_avoid: FCU waypoint arrival stable for %.2f/%.2fs before AUTO resume "
+                "(seq=%d xy=%.3f/%.3f z=%.3f/%.3f vxy=%.3f/%.3f |vz|=%.3f/%.3f).",
+                stable_duration.to_sec(),
+                self.fcu_goal_arrival_exit_hold_time.to_sec(),
+                int(self.fcu_avoidance_target_seq),
+                xy_error,
+                self.fcu_goal_arrival_exit_xy_tolerance,
+                z_error,
+                self.fcu_goal_arrival_exit_z_tolerance,
+                xy_speed,
+                self.fcu_goal_arrival_exit_max_xy_speed,
+                vertical_speed,
+                self.fcu_goal_arrival_exit_max_vz,
+            )
+            return False
+
+        if not self.fcu_goal_arrival_exit_ready:
+            rospy.logwarn(
+                "mission_auto_avoid: FCU waypoint seq=%d reached and stable; stationary planner output "
+                "may now be used to finish GUIDED avoidance (xy=%.3f z=%.3f vxy=%.3f |vz|=%.3f).",
+                int(self.fcu_avoidance_target_seq),
+                xy_error,
+                z_error,
+                xy_speed,
+                vertical_speed,
+            )
+        self.fcu_goal_arrival_exit_ready = True
+        return True
+
     def _log_exit_block_reason(
         self,
         clear_ahead,
         route_rejoin_needed,
         planner_cmd_valid,
+        fcu_goal_arrival_exit_ready,
         exit_current_clearance_safe,
         exit_current_clearance,
         exit_current_clearance_source,
@@ -1129,10 +1245,11 @@ class AutoAvoidManager:
             )
             return
 
-        if not planner_cmd_valid:
+        if not planner_cmd_valid and not fcu_goal_arrival_exit_ready:
             rospy.loginfo_throttle(
                 1.0,
-                "mission_auto_avoid: keep GUIDED because planner output is stale or hovering near the current position.",
+                "mission_auto_avoid: keep GUIDED because planner output is stale or hovering near the current "
+                "position and the FCU waypoint arrival fallback is not ready.",
             )
             return
 
@@ -1368,6 +1485,8 @@ class AutoAvoidManager:
         self.planner_validated_for_exit = False
         self.last_planner_motion_time = None
         self.exit_ready_since = None
+        self.fcu_goal_arrival_exit_since = None
+        self.fcu_goal_arrival_exit_ready = False
         self.rejoin_active = False
         self.avoidance_takeover_active = False
         self.avoidance_goal_released = False
