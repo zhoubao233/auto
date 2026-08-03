@@ -60,6 +60,13 @@ class AutoAvoidManager:
         self.fcu_home_topic = rospy.get_param("~fcu_home_topic", "/mavros/home_position/home")
         self.fcu_set_current_service = rospy.get_param("~fcu_set_current_service", "/mavros/mission/set_current")
         self.sync_fcu_current_on_auto_resume = rospy.get_param("~sync_fcu_current_on_auto_resume", False)
+        self.continue_guided_to_next_fcu_waypoint = rospy.get_param(
+            "~continue_guided_to_next_fcu_waypoint",
+            True,
+        )
+        self.fcu_guided_continue_retry_interval = rospy.Duration(
+            max(0.1, float(rospy.get_param("~fcu_guided_continue_retry_interval", 1.0)))
+        )
         self.fcu_set_current_dist_threshold = float(
             rospy.get_param("~fcu_set_current_dist_threshold", rospy.get_param("~waypoint_reached_radius", 1.0))
         )
@@ -223,6 +230,7 @@ class AutoAvoidManager:
         self.exit_ready_since = None
         self.fcu_goal_arrival_exit_since = None
         self.fcu_goal_arrival_exit_ready = False
+        self.last_fcu_guided_continue_attempt_time = rospy.Time(0)
         self.planning_enabled_state = None
         self.rejoin_active = False
         self.avoidance_takeover_active = False
@@ -745,6 +753,14 @@ class AutoAvoidManager:
             return
 
         self._publish_goal(target, goal_kind="waypoint")
+        if (
+            fcu_goal_arrival_exit_ready
+            and self._continue_guided_to_next_fcu_waypoint_if_blocked()
+        ):
+            self.exit_ready_since = None
+            self.auto_resume_ready_pub.publish(Bool(False))
+            return
+
         planner_or_goal_arrival_ready = planner_cmd_valid or fcu_goal_arrival_exit_ready
         auto_resume_ready = (
             clear_ahead
@@ -1199,6 +1215,147 @@ class AutoAvoidManager:
         self.fcu_goal_arrival_exit_ready = True
         return True
 
+    def _next_fcu_waypoint_for_guided_continuation(self):
+        if (
+            not self.continue_guided_to_next_fcu_waypoint
+            or not self._fcu_goal_arrival_exit_eligible()
+        ):
+            return None
+
+        current_index = int(self.fcu_avoidance_target_nav_index)
+        next_index = current_index + 1
+        if next_index >= len(self.fcu_nav_waypoints):
+            return None
+
+        current_seq = int(self.fcu_avoidance_target_seq)
+        waypoint = self.fcu_nav_waypoints[next_index]
+        # Never skip mission commands. Continuous GUIDED handoff is allowed only
+        # for the immediately following plain navigation waypoint.
+        if (
+            int(waypoint["seq"]) != current_seq + 1
+            or int(waypoint["command"]) != self.MAV_CMD_NAV_WAYPOINT
+        ):
+            return None
+
+        return next_index, waypoint
+
+    def _next_fcu_leg_obstacle(self, next_target):
+        current_pos = self._odom_position()
+        route_distance, _ = self._closest_obstacle_distance_to_segment(
+            current_pos,
+            next_target,
+            self.route_lookahead_distance,
+            self.route_min_forward_distance,
+            reference_point=current_pos,
+        )
+        local_distance, _ = self._closest_obstacle_distance_to_segment(
+            current_pos,
+            next_target,
+            self.local_lookahead_distance,
+            self.local_min_forward_distance,
+        )
+        route_blocked = route_distance <= self.route_obstacle_distance_threshold
+        local_blocked = local_distance <= self.local_obstacle_distance_threshold
+        return route_blocked or local_blocked, route_distance, local_distance
+
+    def _continue_guided_to_next_fcu_waypoint_if_blocked(self):
+        candidate = self._next_fcu_waypoint_for_guided_continuation()
+        if candidate is None or self.set_current_client is None:
+            return False
+
+        next_index, waypoint = candidate
+        next_seq = int(waypoint["seq"])
+        next_target = waypoint["point"]
+        blocked, route_distance, local_distance = self._next_fcu_leg_obstacle(next_target)
+        if not blocked:
+            return False
+
+        route_blocked = route_distance <= self.route_obstacle_distance_threshold
+        local_blocked = local_distance <= self.local_obstacle_distance_threshold
+        source = self._obstacle_source(route_blocked, local_blocked)
+        self.last_route_closest_distance = route_distance
+        self.last_local_closest_distance = local_distance
+        self.last_closest_distance = min(route_distance, local_distance)
+        self.last_obstacle_source = source
+        self.route_closest_distance_pub.publish(Float32(route_distance))
+        self.local_closest_distance_pub.publish(Float32(local_distance))
+        self.closest_distance_pub.publish(Float32(self.last_closest_distance))
+        self.obstacle_flag_pub.publish(Bool(True))
+
+        now = rospy.Time.now()
+        if now - self.last_fcu_guided_continue_attempt_time < self.fcu_guided_continue_retry_interval:
+            return True
+        self.last_fcu_guided_continue_attempt_time = now
+
+        rospy.logwarn(
+            "mission_auto_avoid: next FCU leg seq=%d is blocked after reaching seq=%d; keep GUIDED and "
+            "advance the planner target without an AUTO round trip (source=%s route=%.3f local=%.3f).",
+            next_seq,
+            int(self.fcu_avoidance_target_seq),
+            source,
+            route_distance,
+            local_distance,
+        )
+
+        try:
+            rospy.wait_for_service(self.fcu_set_current_service, timeout=1.0)
+            response = self.set_current_client(wp_seq=next_seq)
+        except (rospy.ROSException, rospy.ServiceException) as exc:
+            rospy.logwarn(
+                "mission_auto_avoid: failed to advance FCU mission seq for continuous GUIDED avoidance; "
+                "keep holding and retry (next_seq=%d): %s",
+                next_seq,
+                exc,
+            )
+            return True
+
+        if not response.success:
+            rospy.logwarn(
+                "mission_auto_avoid: FCU rejected continuous GUIDED mission advance to seq=%d; "
+                "keep holding and retry.",
+                next_seq,
+            )
+            return True
+
+        previous_seq = int(self.fcu_avoidance_target_seq)
+        self.fcu_waypoint_list.current_seq = next_seq
+        self.fcu_current_nav_index = next_index
+        self.fcu_current_target_seq = next_seq
+        self.fcu_avoidance_target_nav_index = next_index
+        self.fcu_avoidance_target_seq = next_seq
+        self.fcu_avoidance_target_point = next_target
+        self.last_goal_waypoint_index = next_seq
+
+        # Start a new avoidance leg while retaining GUIDED control. The previous
+        # trajectory is already stationary at the reached waypoint, so it acts as
+        # the hold command until the planner publishes a fresh trajectory.
+        self.avoidance_start_time = now
+        self.clear_since = None
+        self.exit_ready_since = None
+        self.rejoin_active = False
+        self.avoidance_entry_traj_id = self.last_planner_traj_id
+        self.avoidance_new_traj_seen = False
+        self.planner_valid_since = None
+        self.planner_validated_for_exit = False
+        self.last_planner_motion_time = None
+        self.fcu_goal_arrival_exit_since = None
+        self.fcu_goal_arrival_exit_ready = False
+        self.last_goal_target = None
+        self.last_goal_kind = None
+        self.last_forced_goal_time = now
+        self._publish_goal(next_target, goal_kind="waypoint", force=True)
+
+        rospy.logwarn(
+            "mission_auto_avoid: continuous GUIDED avoidance target advanced %d -> %d; waiting for a fresh "
+            "trajectory to next waypoint target=(%.2f, %.2f, %.2f).",
+            previous_seq,
+            next_seq,
+            next_target[0],
+            next_target[1],
+            next_target[2],
+        )
+        return True
+
     def _log_exit_block_reason(
         self,
         clear_ahead,
@@ -1487,6 +1644,7 @@ class AutoAvoidManager:
         self.exit_ready_since = None
         self.fcu_goal_arrival_exit_since = None
         self.fcu_goal_arrival_exit_ready = False
+        self.last_fcu_guided_continue_attempt_time = rospy.Time(0)
         self.rejoin_active = False
         self.avoidance_takeover_active = False
         self.avoidance_goal_released = False
