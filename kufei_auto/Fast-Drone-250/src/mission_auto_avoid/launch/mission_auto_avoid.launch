@@ -99,6 +99,8 @@
   <arg name="local_min_forward_distance" default="$(arg min_forward_distance)"/>
   <arg name="waypoint_reached_radius" default="1.0"/>
   <arg name="sync_fcu_current_on_auto_resume" default="false"/>
+  <arg name="guide_all_fcu_waypoints" default="true"/>
+  <arg name="preplan_first_waypoint_before_guided" default="true"/>
   <arg name="continue_guided_to_next_fcu_waypoint" default="true"/>
   <arg name="fcu_guided_continue_retry_interval" default="1.0"/>
   <arg name="fcu_set_current_dist_threshold" default="$(arg waypoint_reached_radius)"/>
@@ -117,6 +119,8 @@
   <arg name="post_takeoff_settle_time" default="1.0"/>
   <arg name="post_takeoff_settle_z_tolerance" default="0.4"/>
   <arg name="post_takeoff_settle_max_vz" default="0.10"/>
+  <arg name="takeoff_preplan_z_tolerance" default="0.10"/>
+  <arg name="takeoff_preplan_max_vz" default="0.10"/>
   <arg name="planner_cmd_timeout" default="0.5"/>
   <arg name="planner_valid_hold_time" default="1.0"/>
   <arg name="planner_motion_recent_window" default="1.0"/>
@@ -271,6 +275,8 @@
     <param name="local_min_forward_distance" value="$(arg local_min_forward_distance)"/>
     <param name="waypoint_reached_radius" value="$(arg waypoint_reached_radius)"/>
     <param name="sync_fcu_current_on_auto_resume" value="$(arg sync_fcu_current_on_auto_resume)"/>
+    <param name="guide_all_fcu_waypoints" value="$(arg guide_all_fcu_waypoints)"/>
+    <param name="preplan_first_waypoint_before_guided" value="$(arg preplan_first_waypoint_before_guided)"/>
     <param name="continue_guided_to_next_fcu_waypoint" value="$(arg continue_guided_to_next_fcu_waypoint)"/>
     <param name="fcu_guided_continue_retry_interval" value="$(arg fcu_guided_continue_retry_interval)"/>
     <param name="fcu_set_current_dist_threshold" value="$(arg fcu_set_current_dist_threshold)"/>
@@ -290,6 +296,8 @@
     <param name="post_takeoff_settle_time" value="$(arg post_takeoff_settle_time)"/>
     <param name="post_takeoff_settle_z_tolerance" value="$(arg post_takeoff_settle_z_tolerance)"/>
     <param name="post_takeoff_settle_max_vz" value="$(arg post_takeoff_settle_max_vz)"/>
+    <param name="takeoff_preplan_z_tolerance" value="$(arg takeoff_preplan_z_tolerance)"/>
+    <param name="takeoff_preplan_max_vz" value="$(arg takeoff_preplan_max_vz)"/>
     <param name="planner_cmd_timeout" value="$(arg planner_cmd_timeout)"/>
     <param name="planner_valid_hold_time" value="$(arg planner_valid_hold_time)"/>
     <param name="planner_motion_recent_window" value="$(arg planner_motion_recent_window)"/>

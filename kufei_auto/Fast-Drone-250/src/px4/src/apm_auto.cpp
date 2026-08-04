@@ -104,8 +104,10 @@ volatile bool send_setpoint_enable = false;
 
 static std::atomic<bool> avoidance_enabled(false);
 static bool waiting_for_avoidance_traj = false;
+static bool have_latest_planner_traj_id = false;
 static bool have_control_planner_traj_id = false;
 static bool avoidance_activation_has_control_traj_id = false;
+static uint32_t latest_planner_traj_id = 0;
 static uint32_t control_planner_traj_id = 0;
 static uint32_t avoidance_activation_control_traj_id = 0;
 static double avoidance_takeover_max_setpoint_jump = 1.0;
@@ -236,15 +238,17 @@ void localpositionposeCallback(const geometry_msgs::PoseStamped::ConstPtr& msg)
 
 void avoidanceEnableCallback(const std_msgs::Bool::ConstPtr& msg)
 {
-    const bool was_enabled = avoidance_enabled.exchange(msg->data);
-
     std::lock_guard<std::mutex> lock(control_data_mutex);
+    const bool was_enabled = avoidance_enabled.exchange(msg->data);
 
     if (msg->data && !was_enabled)
     {
         waiting_for_avoidance_traj = true;
-        avoidance_activation_has_control_traj_id = have_control_planner_traj_id;
-        avoidance_activation_control_traj_id = control_planner_traj_id;
+        // PositionCommand is observed even while AUTO owns the vehicle. Record
+        // that latest pre-handoff trajectory here so it cannot be reused after
+        // GUIDED captures the takeoff endpoint.
+        avoidance_activation_has_control_traj_id = have_latest_planner_traj_id;
+        avoidance_activation_control_traj_id = latest_planner_traj_id;
         received_ego_control_cmd = false;
         last_ego_control_cmd_time = ros::Time(0);
         holdCurrentPoseLocked();// 当前实现：锁定最近一次缓存位置
@@ -563,12 +567,18 @@ void straightControldataCallback(const geometry_msgs::PoseStamped::ConstPtr& msg
 /*ego控制模式回调函数*/
 void EGOControldataCallback(const quadrotor_msgs::PositionCommand::ConstPtr& msg)
 {
+    std::lock_guard<std::mutex> lock(control_data_mutex);
+
+    // Track planner output before checking whether avoidance currently owns the
+    // vehicle. This makes the AUTO -> GUIDED handoff reject the trajectory that
+    // was already running during TAKEOFF preplanning and wait for a new id.
+    latest_planner_traj_id = msg->trajectory_id;
+    have_latest_planner_traj_id = true;
+
     if (ctrl_mode_flag != EGO_CTRL || !plannerControlEnabled())
     {
         return;
     }
-
-    std::lock_guard<std::mutex> lock(control_data_mutex);
 
     if (waiting_for_avoidance_traj)
     {
@@ -767,8 +777,10 @@ int px4control_init(ros::NodeHandle nh)
     send_setpoint_enable = false;
     avoidance_enabled.store(false);
     waiting_for_avoidance_traj = false;
+    have_latest_planner_traj_id = false;
     have_control_planner_traj_id = false;
     avoidance_activation_has_control_traj_id = false;
+    latest_planner_traj_id = 0;
     control_planner_traj_id = 0;
     avoidance_activation_control_traj_id = 0;
 

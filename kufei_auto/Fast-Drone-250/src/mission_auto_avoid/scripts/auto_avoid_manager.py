@@ -60,6 +60,11 @@ class AutoAvoidManager:
         self.fcu_home_topic = rospy.get_param("~fcu_home_topic", "/mavros/home_position/home")
         self.fcu_set_current_service = rospy.get_param("~fcu_set_current_service", "/mavros/mission/set_current")
         self.sync_fcu_current_on_auto_resume = rospy.get_param("~sync_fcu_current_on_auto_resume", False)
+        self.guide_all_fcu_waypoints = rospy.get_param("~guide_all_fcu_waypoints", True)
+        self.preplan_first_waypoint_before_guided = rospy.get_param(
+            "~preplan_first_waypoint_before_guided",
+            True,
+        )
         self.continue_guided_to_next_fcu_waypoint = rospy.get_param(
             "~continue_guided_to_next_fcu_waypoint",
             True,
@@ -161,6 +166,14 @@ class AutoAvoidManager:
             0.0,
             float(rospy.get_param("~post_takeoff_settle_max_vz", 0.10)),
         )
+        self.takeoff_preplan_z_tolerance = max(
+            0.0,
+            float(rospy.get_param("~takeoff_preplan_z_tolerance", 0.15)),
+        )
+        self.takeoff_preplan_max_vz = max(
+            0.0,
+            float(rospy.get_param("~takeoff_preplan_max_vz", 0.20)),
+        )
         self.planner_cmd_min_speed = rospy.get_param("~planner_cmd_min_speed", 0.15)
         self.planner_cmd_min_acc = rospy.get_param("~planner_cmd_min_acc", 0.2)
         self.planner_cmd_min_pos_error = rospy.get_param("~planner_cmd_min_pos_error", 0.2)
@@ -234,6 +247,8 @@ class AutoAvoidManager:
         self.planning_enabled_state = None
         self.rejoin_active = False
         self.avoidance_takeover_active = False
+        self.preplanning_before_guided = False
+        self.guided_hold_waiting_for_trajectory = False
         self.avoidance_goal_released = False
         self.last_forced_goal_time = rospy.Time(0)
         self.resume_mode = None
@@ -629,11 +644,16 @@ class AutoAvoidManager:
         if not self.avoidance_active:
             self.planner_cmd_valid_pub.publish(Bool(False))
             self.auto_resume_ready_pub.publish(Bool(False))
-            if obstacle_ahead:
-                self._enter_avoidance(target)
+            guide_all_takeover = self._guide_all_takeover_required()
+            if self._current_target_supports_guided_planning() and (obstacle_ahead or guide_all_takeover):
+                self._enter_avoidance(
+                    target,
+                    trigger="guide_all_fcu_waypoints" if guide_all_takeover else "obstacle",
+                )
             return
 
-        self._request_mode(self.guided_mode)
+        if not self.preplanning_before_guided:
+            self._request_mode(self.guided_mode)
 
         planner_cmd_valid = self._update_planner_validation()
         self.planner_cmd_valid_pub.publish(Bool(planner_cmd_valid))
@@ -648,8 +668,39 @@ class AutoAvoidManager:
             self.exit_ready_since = None
             self.rejoin_active = False
             self.auto_resume_ready_pub.publish(Bool(False))
+
+            if self.preplanning_before_guided:
+                self._publish_goal(
+                    target,
+                    goal_kind="waypoint",
+                    force=(
+                        (not self.avoidance_goal_released)
+                        or self._should_force_goal_retry(self.pre_takeover_goal_retry_interval)
+                    ),
+                )
+                self.avoidance_goal_released = True
+                if self._takeoff_guided_handoff_ready(target):
+                    self._begin_takeoff_guided_hold()
+                else:
+                    rospy.loginfo_throttle(
+                        1.0,
+                        "mission_auto_avoid: preplan during FCU TAKEOFF; keep AUTO only until the "
+                        "takeoff height/vertical-speed handoff gate is reached.",
+                    )
+                return
+
             if not self._guided_hold_ready_for_goal_release():
                 return
+
+            if self.guided_hold_waiting_for_trajectory:
+                if not self._prepare_fcu_seq_for_preplanned_takeover():
+                    return
+                rospy.loginfo_throttle(
+                    1.0,
+                    "mission_auto_avoid: GUIDED is holding the takeoff endpoint while waiting for "
+                    "a fresh trajectory generated from the held pose.",
+                )
+
             self._publish_goal(
                 target,
                 goal_kind="waypoint",
@@ -662,13 +713,57 @@ class AutoAvoidManager:
             if self._planner_takeover_ready():
                 self._activate_avoidance_takeover("new_avoidance_trajectory_ready")
             else:
-                rospy.loginfo_throttle(
-                    1.0,
-                    "mission_auto_avoid: waiting for a fresh planner trajectory before GUIDED takeover.",
-                )
+                if self.guided_hold_waiting_for_trajectory:
+                    rospy.loginfo_throttle(
+                        1.0,
+                        "mission_auto_avoid: keep GUIDED hold until a fresh planner trajectory passes takeover validation.",
+                    )
+                else:
+                    rospy.loginfo_throttle(
+                        1.0,
+                        "mission_auto_avoid: waiting for a fresh planner trajectory before GUIDED takeover.",
+                    )
             return
 
         fcu_goal_arrival_exit_ready = self._update_fcu_goal_arrival_exit(target)
+
+        if self._guide_all_session_active():
+            # In guide-all mode a clear path is still planned as a straight B-spline;
+            # it is not a reason to hand control back to AUTO. Advance directly to
+            # the next plain waypoint, or hand the mission to AUTO only for LAND.
+            self.clear_since = None
+            self.exit_ready_since = None
+            self.rejoin_active = False
+            self.auto_resume_ready_pub.publish(Bool(False))
+
+            if fcu_goal_arrival_exit_ready:
+                if self._continue_guided_to_next_fcu_waypoint_if_blocked():
+                    return
+                if self._handoff_guided_to_fcu_land():
+                    return
+
+                next_command = self._next_fcu_command_after_guided_target()
+                if next_command is None:
+                    rospy.logwarn_throttle(
+                        1.0,
+                        "mission_auto_avoid: final GUIDED waypoint reached but no following LAND command exists; "
+                        "keep GUIDED hold instead of switching to AUTO unexpectedly.",
+                    )
+                else:
+                    rospy.logwarn_throttle(
+                        1.0,
+                        "mission_auto_avoid: GUIDED waypoint reached but next FCU command is unsupported for "
+                        "continuous GUIDED execution (seq=%d command=%d); keep GUIDED hold.",
+                        int(next_command[0]),
+                        int(next_command[1].command),
+                    )
+
+            self._publish_goal(
+                target,
+                goal_kind="waypoint",
+                force=(not planner_cmd_valid and self._should_force_goal_retry(self.stale_goal_retry_interval)),
+            )
+            return
 
         if obstacle_ahead:
             self.clear_since = None
@@ -878,6 +973,51 @@ class AutoAvoidManager:
             return waypoint["point"]
 
         return None
+
+    def _current_target_supports_guided_planning(self):
+        if self.mission_source != "fcu":
+            return True
+        if self._is_return_mode(self.state_msg.mode if self.state_msg is not None else None):
+            return True
+        if self.fcu_current_nav_index is None or self.fcu_current_target_seq is None:
+            return False
+
+        nav_index = int(self.fcu_current_nav_index)
+        if nav_index < 0 or nav_index >= len(self.fcu_nav_waypoints):
+            return False
+        waypoint = self.fcu_nav_waypoints[nav_index]
+        return (
+            int(waypoint["seq"]) == int(self.fcu_current_target_seq)
+            and int(waypoint["command"]) == self.MAV_CMD_NAV_WAYPOINT
+        )
+
+    def _guide_all_takeover_required(self):
+        return (
+            self.guide_all_fcu_waypoints
+            and self.mission_source == "fcu"
+            and not self._is_return_mode(self.state_msg.mode if self.state_msg is not None else None)
+            and self._current_target_supports_guided_planning()
+        )
+
+    def _guide_all_session_active(self):
+        if (
+            not self.guide_all_fcu_waypoints
+            or self.mission_source != "fcu"
+            or not self.avoidance_active
+            or self._is_return_mode(self.state_msg.mode if self.state_msg is not None else None)
+            or self.fcu_avoidance_target_nav_index is None
+            or self.fcu_avoidance_target_seq is None
+        ):
+            return False
+
+        nav_index = int(self.fcu_avoidance_target_nav_index)
+        if nav_index < 0 or nav_index >= len(self.fcu_nav_waypoints):
+            return False
+        waypoint = self.fcu_nav_waypoints[nav_index]
+        return (
+            int(waypoint["seq"]) == int(self.fcu_avoidance_target_seq)
+            and int(waypoint["command"]) == self.MAV_CMD_NAV_WAYPOINT
+        )
 
     def _current_route_segment(self, target):
         if self.mission_source == "fcu":
@@ -1217,7 +1357,7 @@ class AutoAvoidManager:
 
     def _next_fcu_waypoint_for_guided_continuation(self):
         if (
-            not self.continue_guided_to_next_fcu_waypoint
+            not (self.continue_guided_to_next_fcu_waypoint or self.guide_all_fcu_waypoints)
             or not self._fcu_goal_arrival_exit_eligible()
         ):
             return None
@@ -1267,7 +1407,7 @@ class AutoAvoidManager:
         next_seq = int(waypoint["seq"])
         next_target = waypoint["point"]
         blocked, route_distance, local_distance = self._next_fcu_leg_obstacle(next_target)
-        if not blocked:
+        if not blocked and not self.guide_all_fcu_waypoints:
             return False
 
         route_blocked = route_distance <= self.route_obstacle_distance_threshold
@@ -1280,22 +1420,30 @@ class AutoAvoidManager:
         self.route_closest_distance_pub.publish(Float32(route_distance))
         self.local_closest_distance_pub.publish(Float32(local_distance))
         self.closest_distance_pub.publish(Float32(self.last_closest_distance))
-        self.obstacle_flag_pub.publish(Bool(True))
+        self.obstacle_flag_pub.publish(Bool(blocked))
 
         now = rospy.Time.now()
         if now - self.last_fcu_guided_continue_attempt_time < self.fcu_guided_continue_retry_interval:
             return True
         self.last_fcu_guided_continue_attempt_time = now
 
-        rospy.logwarn(
-            "mission_auto_avoid: next FCU leg seq=%d is blocked after reaching seq=%d; keep GUIDED and "
-            "advance the planner target without an AUTO round trip (source=%s route=%.3f local=%.3f).",
-            next_seq,
-            int(self.fcu_avoidance_target_seq),
-            source,
-            route_distance,
-            local_distance,
-        )
+        if blocked:
+            rospy.logwarn(
+                "mission_auto_avoid: next FCU leg seq=%d is blocked after reaching seq=%d; keep GUIDED and "
+                "advance the planner target without an AUTO round trip (source=%s route=%.3f local=%.3f).",
+                next_seq,
+                int(self.fcu_avoidance_target_seq),
+                source,
+                route_distance,
+                local_distance,
+            )
+        else:
+            rospy.logwarn(
+                "mission_auto_avoid: guide-all policy keeps GUIDED after reaching seq=%d; advance directly "
+                "to clear next waypoint seq=%d without an AUTO round trip.",
+                int(self.fcu_avoidance_target_seq),
+                next_seq,
+            )
 
         try:
             rospy.wait_for_service(self.fcu_set_current_service, timeout=1.0)
@@ -1354,6 +1502,67 @@ class AutoAvoidManager:
             next_target[1],
             next_target[2],
         )
+        return True
+
+    def _next_fcu_command_after_guided_target(self):
+        if (
+            not self._fcu_goal_arrival_exit_eligible()
+            or self.fcu_waypoint_list is None
+            or self.fcu_avoidance_target_seq is None
+        ):
+            return None
+
+        next_seq = int(self.fcu_avoidance_target_seq) + 1
+        if next_seq < 0 or next_seq >= len(self.fcu_waypoint_list.waypoints):
+            return None
+        return next_seq, self.fcu_waypoint_list.waypoints[next_seq]
+
+    def _handoff_guided_to_fcu_land(self):
+        if not self.guide_all_fcu_waypoints or self.set_current_client is None:
+            return False
+
+        candidate = self._next_fcu_command_after_guided_target()
+        if candidate is None:
+            return False
+
+        next_seq, waypoint = candidate
+        if int(waypoint.command) != self.MAV_CMD_NAV_LAND:
+            return False
+
+        now = rospy.Time.now()
+        if now - self.last_fcu_guided_continue_attempt_time < self.fcu_guided_continue_retry_interval:
+            return True
+        self.last_fcu_guided_continue_attempt_time = now
+
+        try:
+            rospy.wait_for_service(self.fcu_set_current_service, timeout=1.0)
+            response = self.set_current_client(wp_seq=next_seq)
+        except (rospy.ROSException, rospy.ServiceException) as exc:
+            rospy.logwarn(
+                "mission_auto_avoid: failed to select FCU LAND seq=%d after final GUIDED waypoint; "
+                "keep GUIDED hold and retry: %s",
+                next_seq,
+                exc,
+            )
+            return True
+
+        if not response.success:
+            rospy.logwarn(
+                "mission_auto_avoid: FCU rejected LAND mission selection seq=%d; keep GUIDED hold and retry.",
+                next_seq,
+            )
+            return True
+
+        previous_seq = int(self.fcu_avoidance_target_seq)
+        self.fcu_waypoint_list.current_seq = next_seq
+        self.fcu_current_target_seq = next_seq
+        rospy.logwarn(
+            "mission_auto_avoid: final GUIDED waypoint seq=%d reached; selected FCU LAND seq=%d and hand "
+            "control to AUTO for landing.",
+            previous_seq,
+            next_seq,
+        )
+        self._exit_avoidance("next_fcu_command_land")
         return True
 
     def _log_exit_block_reason(
@@ -1430,7 +1639,7 @@ class AutoAvoidManager:
                 "mission_auto_avoid: keep GUIDED because exit debounce is still accumulating.",
             )
 
-    def _enter_avoidance(self, target):
+    def _enter_avoidance(self, target, trigger="obstacle"):
         if not self._guided_requests_allowed():
             rospy.loginfo_throttle(
                 1.0,
@@ -1439,7 +1648,16 @@ class AutoAvoidManager:
             )
             return
 
-        if not self._fcu_auto_target_ready_for_avoidance():
+        preplan_before_guided = (
+            trigger == "guide_all_fcu_waypoints"
+            and self.preplan_first_waypoint_before_guided
+            and self.mission_source == "fcu"
+        )
+
+        if not self._fcu_auto_target_ready_for_avoidance(
+            allow_takeoff_preplan=preplan_before_guided,
+            target=target,
+        ):
             return
 
         if self.mission_source == "fcu" and not self._is_return_mode(self.state_msg.mode):
@@ -1453,6 +1671,8 @@ class AutoAvoidManager:
 
         self.avoidance_active = True
         self.avoidance_takeover_active = False
+        self.preplanning_before_guided = preplan_before_guided
+        self.guided_hold_waiting_for_trajectory = False
         self.avoidance_goal_released = False
         self.avoidance_start_time = rospy.Time.now()
         self.resume_mode = self._mode_to_resume_after_avoidance()
@@ -1466,24 +1686,57 @@ class AutoAvoidManager:
         self.exit_ready_since = None
         self.last_forced_goal_time = rospy.Time.now()
 
-        self.avoidance_active_pub.publish(Bool(True))
-        self._request_mode(self.guided_mode)
+        if self.preplanning_before_guided:
+            # Keep FCU AUTO in charge of TAKEOFF while the planner creates and
+            # warms up the first target. As soon as the altitude/vz handoff gate
+            # is reached, publish the avoidance flag and switch to GUIDED hold;
+            # never let AUTO continue horizontally while waiting for planning.
+            self.avoidance_active_pub.publish(Bool(False))
+        else:
+            self.avoidance_active_pub.publish(Bool(True))
+            self._request_mode(self.guided_mode)
 
         if not self._set_planning_enabled(True, timeout=self.planning_service_timeout):
-            rospy.logwarn("mission_auto_avoid: failed to enable planner after switching to %s hold, will retry.", self.guided_mode)
+            rospy.logwarn("mission_auto_avoid: failed to enable planner for avoidance, will retry.")
 
-        rospy.logwarn(
-            "mission_auto_avoid: obstacle ahead, switch to %s hold, wait for speed <= %.2fm/s, then release planner goal. source=%s closest=%.3f route=%.3f local=%.3f target=(%.2f, %.2f, %.2f)",
-            self.guided_mode,
-            self.guided_hold_speed_threshold,
-            self.last_obstacle_source,
-            self.last_closest_distance,
-            self.last_route_closest_distance,
-            self.last_local_closest_distance,
-            target[0],
-            target[1],
-            target[2],
-        )
+        if self.preplanning_before_guided:
+            self._publish_goal(target, goal_kind="waypoint", force=True)
+            self.avoidance_goal_released = True
+            rospy.logwarn(
+                "mission_auto_avoid: start preplanning FCU waypoint seq=%d during TAKEOFF; switch to %s "
+                "hold immediately at the takeoff height/vz gate, then accept only a fresh trajectory "
+                "generated from the held pose "
+                "target=(%.2f, %.2f, %.2f).",
+                int(self.fcu_avoidance_target_seq),
+                self.guided_mode,
+                target[0],
+                target[1],
+                target[2],
+            )
+        elif trigger == "guide_all_fcu_waypoints":
+            rospy.logwarn(
+                "mission_auto_avoid: TAKEOFF is complete and stable; guide-all policy switches to %s for "
+                "FCU waypoint seq=%d regardless of obstacle state, then waits for a fresh planner trajectory "
+                "target=(%.2f, %.2f, %.2f).",
+                self.guided_mode,
+                int(self.fcu_avoidance_target_seq),
+                target[0],
+                target[1],
+                target[2],
+            )
+        else:
+            rospy.logwarn(
+                "mission_auto_avoid: obstacle ahead, switch to %s hold, wait for speed <= %.2fm/s, then release planner goal. source=%s closest=%.3f route=%.3f local=%.3f target=(%.2f, %.2f, %.2f)",
+                self.guided_mode,
+                self.guided_hold_speed_threshold,
+                self.last_obstacle_source,
+                self.last_closest_distance,
+                self.last_route_closest_distance,
+                self.last_local_closest_distance,
+                target[0],
+                target[1],
+                target[2],
+            )
 
     def _exit_avoidance(self, reason):
         resume_mode = self.resume_mode or self.auto_mode
@@ -1498,7 +1751,7 @@ class AutoAvoidManager:
     def _guided_requests_allowed(self):
         return self.mode_select_flag is not None and self.mode_select_flag != 0
 
-    def _fcu_auto_target_ready_for_avoidance(self):
+    def _fcu_auto_target_ready_for_avoidance(self, allow_takeoff_preplan=False, target=None):
         if self.mission_source != "fcu":
             return True
 
@@ -1524,6 +1777,20 @@ class AutoAvoidManager:
 
         current_seq = int(self.fcu_waypoint_list.current_seq)
         first_avoidance_seq = self.fcu_takeoff_seq + 1 if self.fcu_takeoff_seq is not None else 1
+
+        if (
+            allow_takeoff_preplan
+            and self.fcu_takeoff_seq is not None
+            and current_seq == int(self.fcu_takeoff_seq)
+        ):
+            if self.fcu_current_target_seq != first_avoidance_seq or target is None:
+                return False
+
+            # Start planning as soon as FCU executes TAKEOFF. In planar mode the
+            # planner keeps the target pending until z/vz are valid, hiding map
+            # and service latency inside the vertical climb.
+            return True
+
         if current_seq < first_avoidance_seq:
             rospy.loginfo_throttle(
                 1.0,
@@ -1535,7 +1802,11 @@ class AutoAvoidManager:
             )
             return False
 
-        if current_seq == first_avoidance_seq and not self.post_takeoff_settle_complete:
+        if (
+            current_seq == first_avoidance_seq
+            and not allow_takeoff_preplan
+            and not self.post_takeoff_settle_complete
+        ):
             return False
 
         if self.fcu_current_target_seq is None or self.fcu_current_target_seq < current_seq:
@@ -1647,6 +1918,8 @@ class AutoAvoidManager:
         self.last_fcu_guided_continue_attempt_time = rospy.Time(0)
         self.rejoin_active = False
         self.avoidance_takeover_active = False
+        self.preplanning_before_guided = False
+        self.guided_hold_waiting_for_trajectory = False
         self.avoidance_goal_released = False
         self.last_forced_goal_time = rospy.Time(0)
         self.resume_mode = None
@@ -1689,6 +1962,49 @@ class AutoAvoidManager:
 
         return True
 
+    def _takeoff_guided_handoff_ready(self, target):
+        current_z = self._odom_position()[2]
+        current_vz = abs(float(self.odom_msg.twist.twist.linear.z))
+        z_error = abs(current_z - target[2])
+        ready = (
+            z_error <= self.takeoff_preplan_z_tolerance
+            and current_vz <= self.takeoff_preplan_max_vz
+        )
+        if not ready:
+            rospy.loginfo_throttle(
+                1.0,
+                "mission_auto_avoid: preplanning first GUIDED leg during TAKEOFF; wait to hand off "
+                "at the takeoff endpoint (z_error=%.3f/%.3f |vz|=%.3f/%.3f).",
+                z_error,
+                self.takeoff_preplan_z_tolerance,
+                current_vz,
+                self.takeoff_preplan_max_vz,
+            )
+        return ready
+
+    def _begin_takeoff_guided_hold(self):
+        # Capture the last pre-handoff trajectory. After avoidance is enabled,
+        # both this manager and apm_auto wait for a fresh trajectory while
+        # GUIDED holds the takeoff endpoint.
+        self.avoidance_entry_traj_id = self.last_planner_traj_id
+        self.avoidance_new_traj_seen = False
+        self.planner_valid_since = None
+        self.planner_validated_for_exit = False
+        self.last_planner_motion_time = None
+        self.preplanning_before_guided = False
+        self.guided_hold_waiting_for_trajectory = True
+        self.avoidance_takeover_active = False
+        self.avoidance_goal_released = False
+        self.last_forced_goal_time = rospy.Time(0)
+
+        self.avoidance_active_pub.publish(Bool(True))
+        self._request_mode(self.guided_mode)
+        rospy.logwarn(
+            "mission_auto_avoid: TAKEOFF endpoint reached; enable avoidance and switch to %s hold now. "
+            "AUTO must not advance horizontally while the fresh B-spline is generated.",
+            self.guided_mode,
+        )
+
     def _planner_takeover_ready(self):
         if self.last_planner_cmd_msg is None:
             return False
@@ -1717,11 +2033,72 @@ class AutoAvoidManager:
 
         return True
 
+    def _prepare_fcu_seq_for_preplanned_takeover(self):
+        if (
+            not (self.preplanning_before_guided or self.guided_hold_waiting_for_trajectory)
+            or self.mission_source != "fcu"
+            or self.fcu_waypoint_list is None
+            or self.fcu_avoidance_target_seq is None
+            or self.set_current_client is None
+        ):
+            return True
+
+        target_seq = int(self.fcu_avoidance_target_seq)
+        current_seq = int(self.fcu_waypoint_list.current_seq)
+        if current_seq == target_seq:
+            return True
+        if current_seq > target_seq:
+            rospy.logwarn(
+                "mission_auto_avoid: FCU mission advanced past the first GUIDED target while AUTO was "
+                "finishing TAKEOFF; reselect seq=%d from GUIDED hold (current_seq=%d).",
+                target_seq,
+                current_seq,
+            )
+
+        now = rospy.Time.now()
+        if now - self.last_fcu_guided_continue_attempt_time < self.fcu_guided_continue_retry_interval:
+            return False
+        self.last_fcu_guided_continue_attempt_time = now
+
+        try:
+            rospy.wait_for_service(self.fcu_set_current_service, timeout=1.0)
+            response = self.set_current_client(wp_seq=target_seq)
+        except (rospy.ROSException, rospy.ServiceException) as exc:
+            rospy.logwarn(
+                "mission_auto_avoid: failed to select first GUIDED FCU waypoint seq=%d; keep GUIDED hold and retry: %s",
+                target_seq,
+                exc,
+            )
+            return False
+
+        if not response.success:
+            rospy.logwarn(
+                "mission_auto_avoid: FCU rejected first GUIDED waypoint seq=%d; keep GUIDED hold and retry.",
+                target_seq,
+            )
+            return False
+
+        self.fcu_waypoint_list.current_seq = target_seq
+        self.fcu_current_target_seq = target_seq
+        self.post_takeoff_settle_complete = True
+        self.post_takeoff_settle_since = None
+        rospy.logwarn(
+            "mission_auto_avoid: GUIDED hold active; FCU mission selected first guided waypoint seq=%d.",
+            target_seq,
+        )
+        return True
+
     def _activate_avoidance_takeover(self, reason):
+        if not self._prepare_fcu_seq_for_preplanned_takeover():
+            return False
+
+        self.preplanning_before_guided = False
+        self.guided_hold_waiting_for_trajectory = False
         self.avoidance_takeover_active = True
         self.avoidance_active_pub.publish(Bool(True))
         self._request_mode(self.guided_mode)
         rospy.logwarn("mission_auto_avoid: planner ready, allow %s trajectory tracking (%s).", self.guided_mode, reason)
+        return True
 
     def _publish_goal(self, target, goal_kind, force=False):
         if not force and self.last_goal_kind == goal_kind and self._same_point(self.last_goal_target, target):

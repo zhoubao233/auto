@@ -255,6 +255,10 @@ namespace ego_planner
     if (success)
     {
       end_pt_ = global_target;// 记录当前航点；二维模式下 Z 是本航段锁定高度
+      ROS_WARN("Global trajectory accepted: start=[%.2f, %.2f, %.2f] target=[%.2f, %.2f, %.2f] state=%d.",
+               global_start_pos(0), global_start_pos(1), global_start_pos(2),
+               global_target(0), global_target(1), global_target(2),
+               static_cast<int>(exec_state_));
 
       /*** display ***/
       constexpr double step_size_t = 0.1;
@@ -271,26 +275,24 @@ namespace ego_planner
       have_new_target_ = true;// 标志位：这是一个刚来的新目标点
 
       /*** FSM 状态切换 ***/
-      if (exec_state_ == WAIT_TARGET) /*等待目标中 */
-        changeFSMExecState(GEN_NEW_TRAJ, "TRIG"); // 直接把状态切换为 GEN_NEW_TRAJ（生成新轨迹），开始起飞！
-      else
-      { 
-        while (ros::ok() && exec_state_ != EXEC_TRAJ)/*等 正在飞（EXEC_TRAJ）的状态结束   */
-        {
-          if (!planning_enabled_)
-          {
-            ROS_INFO("Planner disabled while waiting for EXEC_TRAJ, abort planNextWaypoint.");
-            return;
-          }
-          ros::spinOnce();
-          ros::Duration(0.001).sleep();
-        }
-        if (!planning_enabled_)
-        {
-          ROS_INFO("Planner disabled before replan trigger, abort planNextWaypoint.");
-          return;
-        }
+      if (exec_state_ == WAIT_TARGET || exec_state_ == INIT) /*等待目标中 */
+      {
+        changeFSMExecState(GEN_NEW_TRAJ, "TRIG"); // 直接把状态切换为 GEN_NEW_TRAJ（生成新轨迹）
+      }
+      else if (exec_state_ == EXEC_TRAJ)
+      {
         changeFSMExecState(REPLAN_TRAJ, "TRIG");/*重新规划轨迹*/
+      }
+      else
+      {
+        // Do not spin recursively waiting for EXEC_TRAJ here. The manager may
+        // retry an identical goal while the first trajectory is still being
+        // generated; recursively calling ros::spinOnce() from this callback can
+        // nest more waypoint callbacks and starve the FSM timer. The global
+        // target above is already refreshed, so let the current FSM state finish.
+        ROS_INFO_THROTTLE(1.0,
+                          "Planner target refreshed while trajectory generation is already in progress (state=%d).",
+                          static_cast<int>(exec_state_));
       }
 
       // visualization_->displayGoalPoint(end_pt_, Eigen::Vector4d(1, 0, 0, 1), 0.3, 0);
@@ -716,6 +718,7 @@ namespace ego_planner
       }
       else
       {
+        ROS_WARN_THROTTLE(1.0, "Failed to generate the first local B-spline; retrying GEN_NEW_TRAJ.");
         changeFSMExecState(GEN_NEW_TRAJ, "FSM");
       }
       break;
