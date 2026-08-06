@@ -126,7 +126,7 @@ namespace ego_planner
     }
     else if(target_type_ == TARGET_TYPE::OUTPUT_TARGET){/*外部算法给点*/
       ROS_ERROR("external target mode");
-      waypoint_sub_ = nh.subscribe("/ego_input_target", 5, &EGOReplanFSM::outputWaypointCallback, this);
+      waypoint_sub_ = nh.subscribe("/ego_input_target", 1, &EGOReplanFSM::outputWaypointCallback, this);
     }
     else
       cout << "Wrong target_type_ value! target_type_=" << target_type_ << endl;
@@ -254,11 +254,26 @@ namespace ego_planner
 
     if (success)
     {
+      const bool target_changed =
+          !have_target_ || (global_target - end_pt_).norm() > 1e-3;
+
       end_pt_ = global_target;// 记录当前航点；二维模式下 Z 是本航段锁定高度
       ROS_WARN("Global trajectory accepted: start=[%.2f, %.2f, %.2f] target=[%.2f, %.2f, %.2f] state=%d.",
                global_start_pos(0), global_start_pos(1), global_start_pos(2),
                global_target(0), global_target(1), global_target(2),
                static_cast<int>(exec_state_));
+
+      // A failure while planning the previous (already reached) target must not
+      // make the first attempt for a different target use a random polynomial.
+      // Keep random initialization available only after a deterministic attempt
+      // for this target has genuinely failed.
+      if (target_changed &&
+          (exec_state_ == GEN_NEW_TRAJ || exec_state_ == SEQUENTIAL_START))
+      {
+        continously_called_times_ = 1;
+        ROS_WARN("New global target accepted; reset trajectory-generation retry state "
+                 "so its first local B-spline uses deterministic initialization.");
+      }
 
       /*** display ***/
       constexpr double step_size_t = 0.1;

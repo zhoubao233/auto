@@ -133,7 +133,7 @@ class AutoAvoidManager:
         self.clear_hold_time = rospy.Duration(rospy.get_param("~clear_hold_time", 1.0))
         self.guided_exit_debounce = rospy.Duration(rospy.get_param("~guided_exit_debounce", 2.0))
         self.fcu_goal_arrival_exit_hold_time = rospy.Duration(
-            max(0.0, float(rospy.get_param("~fcu_goal_arrival_exit_hold_time", 1.0)))
+            max(0.0, float(rospy.get_param("~fcu_goal_arrival_exit_hold_time", 0.5)))
         )
         self.fcu_goal_arrival_exit_xy_tolerance = max(
             0.0,
@@ -146,6 +146,35 @@ class AutoAvoidManager:
         self.fcu_goal_arrival_exit_max_xy_speed = max(
             0.0,
             float(rospy.get_param("~fcu_goal_arrival_exit_max_xy_speed", 0.25)),
+        )
+        self.fcu_goal_arrival_exit_dynamic_speed_enabled = bool(
+            rospy.get_param("~fcu_goal_arrival_exit_dynamic_speed_enabled", True)
+        )
+        self.fcu_goal_arrival_exit_straight_angle_deg = min(
+            180.0,
+            max(
+                0.0,
+                float(rospy.get_param("~fcu_goal_arrival_exit_straight_angle_deg", 30.0)),
+            ),
+        )
+        self.fcu_goal_arrival_exit_uturn_angle_deg = min(
+            180.0,
+            max(
+                self.fcu_goal_arrival_exit_straight_angle_deg,
+                float(rospy.get_param("~fcu_goal_arrival_exit_uturn_angle_deg", 135.0)),
+            ),
+        )
+        self.fcu_goal_arrival_exit_straight_max_xy_speed = max(
+            0.0,
+            float(rospy.get_param("~fcu_goal_arrival_exit_straight_max_xy_speed", 0.45)),
+        )
+        self.fcu_goal_arrival_exit_turn_max_xy_speed = max(
+            0.0,
+            float(rospy.get_param("~fcu_goal_arrival_exit_turn_max_xy_speed", 0.30)),
+        )
+        self.fcu_goal_arrival_exit_uturn_max_xy_speed = max(
+            0.0,
+            float(rospy.get_param("~fcu_goal_arrival_exit_uturn_max_xy_speed", 0.20)),
         )
         self.fcu_goal_arrival_exit_max_vz = max(
             0.0,
@@ -1294,6 +1323,74 @@ class AutoAvoidManager:
             and int(self.fcu_waypoint_list.current_seq) == target_seq
         )
 
+    def _fcu_goal_arrival_exit_xy_speed_profile(self):
+        fallback = (
+            self.fcu_goal_arrival_exit_max_xy_speed,
+            "fallback",
+            None,
+        )
+        if not self.fcu_goal_arrival_exit_dynamic_speed_enabled:
+            return fallback
+
+        current_index = int(self.fcu_avoidance_target_nav_index)
+        next_index = current_index + 1
+        if current_index < 0 or next_index >= len(self.fcu_nav_waypoints):
+            return fallback
+
+        current_waypoint = self.fcu_nav_waypoints[current_index]
+        next_waypoint = self.fcu_nav_waypoints[next_index]
+        if (
+            int(current_waypoint["command"]) != self.MAV_CMD_NAV_WAYPOINT
+            or int(next_waypoint["command"]) != self.MAV_CMD_NAV_WAYPOINT
+            or int(next_waypoint["seq"]) != int(current_waypoint["seq"]) + 1
+        ):
+            return fallback
+
+        if current_index > 0:
+            previous_point = self.fcu_nav_waypoints[current_index - 1]["point"]
+        elif self.fcu_home_position is not None:
+            previous_point = self.fcu_home_position
+        else:
+            return fallback
+
+        current_point = current_waypoint["point"]
+        next_point = next_waypoint["point"]
+        incoming = (
+            float(current_point[0]) - float(previous_point[0]),
+            float(current_point[1]) - float(previous_point[1]),
+        )
+        outgoing = (
+            float(next_point[0]) - float(current_point[0]),
+            float(next_point[1]) - float(current_point[1]),
+        )
+        incoming_norm = math.hypot(incoming[0], incoming[1])
+        outgoing_norm = math.hypot(outgoing[0], outgoing[1])
+        if incoming_norm < 1e-3 or outgoing_norm < 1e-3:
+            return fallback
+
+        cosine = (
+            incoming[0] * outgoing[0] + incoming[1] * outgoing[1]
+        ) / (incoming_norm * outgoing_norm)
+        turn_angle_deg = math.degrees(math.acos(min(1.0, max(-1.0, cosine))))
+
+        if turn_angle_deg <= self.fcu_goal_arrival_exit_straight_angle_deg:
+            return (
+                self.fcu_goal_arrival_exit_straight_max_xy_speed,
+                "straight",
+                turn_angle_deg,
+            )
+        if turn_angle_deg >= self.fcu_goal_arrival_exit_uturn_angle_deg:
+            return (
+                self.fcu_goal_arrival_exit_uturn_max_xy_speed,
+                "uturn",
+                turn_angle_deg,
+            )
+        return (
+            self.fcu_goal_arrival_exit_turn_max_xy_speed,
+            "turn",
+            turn_angle_deg,
+        )
+
     def _update_fcu_goal_arrival_exit(self, target):
         if not self._fcu_goal_arrival_exit_eligible():
             self.fcu_goal_arrival_exit_since = None
@@ -1306,10 +1403,13 @@ class AutoAvoidManager:
         z_error = abs(current_pos[2] - target[2])
         xy_speed = math.hypot(float(velocity.x), float(velocity.y))
         vertical_speed = abs(float(velocity.z))
+        xy_speed_limit, speed_profile, turn_angle_deg = (
+            self._fcu_goal_arrival_exit_xy_speed_profile()
+        )
         stable = (
             xy_error <= self.fcu_goal_arrival_exit_xy_tolerance
             and z_error <= self.fcu_goal_arrival_exit_z_tolerance
-            and xy_speed <= self.fcu_goal_arrival_exit_max_xy_speed
+            and xy_speed <= xy_speed_limit
             and vertical_speed <= self.fcu_goal_arrival_exit_max_vz
         )
 
@@ -1327,7 +1427,8 @@ class AutoAvoidManager:
             rospy.loginfo_throttle(
                 1.0,
                 "mission_auto_avoid: FCU waypoint arrival stable for %.2f/%.2fs before AUTO resume "
-                "(seq=%d xy=%.3f/%.3f z=%.3f/%.3f vxy=%.3f/%.3f |vz|=%.3f/%.3f).",
+                "(seq=%d xy=%.3f/%.3f z=%.3f/%.3f vxy=%.3f/%.3f |vz|=%.3f/%.3f "
+                "profile=%s turn=%s).",
                 stable_duration.to_sec(),
                 self.fcu_goal_arrival_exit_hold_time.to_sec(),
                 int(self.fcu_avoidance_target_seq),
@@ -1336,21 +1437,27 @@ class AutoAvoidManager:
                 z_error,
                 self.fcu_goal_arrival_exit_z_tolerance,
                 xy_speed,
-                self.fcu_goal_arrival_exit_max_xy_speed,
+                xy_speed_limit,
                 vertical_speed,
                 self.fcu_goal_arrival_exit_max_vz,
+                speed_profile,
+                "n/a" if turn_angle_deg is None else "%.1fdeg" % turn_angle_deg,
             )
             return False
 
         if not self.fcu_goal_arrival_exit_ready:
             rospy.logwarn(
                 "mission_auto_avoid: FCU waypoint seq=%d reached and stable; stationary planner output "
-                "may now be used to finish GUIDED avoidance (xy=%.3f z=%.3f vxy=%.3f |vz|=%.3f).",
+                "may now be used to finish GUIDED avoidance "
+                "(xy=%.3f z=%.3f vxy=%.3f/%.3f |vz|=%.3f profile=%s turn=%s).",
                 int(self.fcu_avoidance_target_seq),
                 xy_error,
                 z_error,
                 xy_speed,
+                xy_speed_limit,
                 vertical_speed,
+                speed_profile,
+                "n/a" if turn_angle_deg is None else "%.1fdeg" % turn_angle_deg,
             )
         self.fcu_goal_arrival_exit_ready = True
         return True
