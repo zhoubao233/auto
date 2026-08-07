@@ -110,7 +110,7 @@
   <arg name="avoidance_min_duration" default="2.0"/>
   <arg name="clear_hold_time" default="1.0"/>
   <arg name="guided_exit_debounce" default="2.0"/>
-  <arg name="fcu_goal_arrival_exit_hold_time" default="0.4"/>
+  <arg name="fcu_goal_arrival_exit_hold_time" default="0.3"/>
   <arg name="fcu_goal_arrival_exit_xy_tolerance" default="0.4"/>
   <arg name="fcu_goal_arrival_exit_z_tolerance" default="0.3"/>
   <arg name="fcu_goal_arrival_exit_max_xy_speed" default="0.25"/>
@@ -118,8 +118,8 @@
   <arg name="fcu_goal_arrival_exit_straight_angle_deg" default="30.0"/>
   <arg name="fcu_goal_arrival_exit_uturn_angle_deg" default="135.0"/>
   <arg name="fcu_goal_arrival_exit_straight_max_xy_speed" default="0.30"/>
-  <arg name="fcu_goal_arrival_exit_turn_max_xy_speed" default="0.20"/>
-  <arg name="fcu_goal_arrival_exit_uturn_max_xy_speed" default="0.15"/>
+  <arg name="fcu_goal_arrival_exit_turn_max_xy_speed" default="0.30"/>
+  <arg name="fcu_goal_arrival_exit_uturn_max_xy_speed" default="0.30"/>
   <arg name="fcu_goal_arrival_exit_max_vz" default="0.15"/>
   <arg name="guided_hold_speed_threshold" default="0.2"/>
   <arg name="post_takeoff_settle_time" default="1.0"/>
