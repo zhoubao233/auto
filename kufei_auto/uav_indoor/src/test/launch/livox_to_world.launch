@@ -19,6 +19,12 @@
     <arg name="self_filter_y" default="0.85" />
     <arg name="self_filter_z" default="0.6" />
 
+    <!-- 稀疏假点过滤：短时缓存 + 体素点数 + 连续帧确认。 -->
+    <arg name="cloud_cache_duration" default="0.8" />
+    <arg name="voxel_size" default="0.25" />
+    <arg name="min_points_per_voxel" default="2" />
+    <arg name="min_consecutive_frames" default="3" />
+
     <node name="livox_to_world" pkg="test" type="livox_to_world"
           output="screen">
         <param name="livox_topic" value="$(arg livox_topic)" />
@@ -38,5 +44,13 @@
         <param name="self_filter_x" value="$(arg self_filter_x)" />
         <param name="self_filter_y" value="$(arg self_filter_y)" />
         <param name="self_filter_z" value="$(arg self_filter_z)" />
+
+        <param name="cloud_cache_duration"
+               value="$(arg cloud_cache_duration)" />
+        <param name="voxel_size" value="$(arg voxel_size)" />
+        <param name="min_points_per_voxel"
+               value="$(arg min_points_per_voxel)" />
+        <param name="min_consecutive_frames"
+               value="$(arg min_consecutive_frames)" />
     </node>
 </launch>

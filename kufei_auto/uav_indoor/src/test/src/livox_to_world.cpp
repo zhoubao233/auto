@@ -11,9 +11,12 @@
 #include <message_filters/synchronizer.h>
 #include <Eigen/Geometry>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <string>
+#include <unordered_map>
 
 class LivoxToWorldTransformer
 {
@@ -43,10 +46,63 @@ private:
     Eigen::Matrix3d sensor_to_body_;
     Eigen::Vector3d sensor_translation_;
 
-    static constexpr std::size_t MAX_BUFFER_SIZE = 100000;
+    struct VoxelKey
+    {
+        int x;
+        int y;
+        int z;
 
-    // This buffer is always stored in output/world coordinates.
-    pcl::PointCloud<pcl::PointXYZ>::Ptr accumulated_world_cloud_;
+        bool operator==(const VoxelKey &other) const
+        {
+            return x == other.x && y == other.y && z == other.z;
+        }
+    };
+
+    struct VoxelKeyHash
+    {
+        std::size_t operator()(const VoxelKey &key) const
+        {
+            std::size_t seed = std::hash<int>()(key.x);
+            seed ^= std::hash<int>()(key.y) + 0x9e3779b9 +
+                    (seed << 6) + (seed >> 2);
+            seed ^= std::hash<int>()(key.z) + 0x9e3779b9 +
+                    (seed << 6) + (seed >> 2);
+            return seed;
+        }
+    };
+
+    struct FrameVoxelStats
+    {
+        double sum_x = 0.0;
+        double sum_y = 0.0;
+        double sum_z = 0.0;
+        int point_count = 0;
+    };
+
+    struct PersistentVoxel
+    {
+        double x = 0.0;
+        double y = 0.0;
+        double z = 0.0;
+        int consecutive_frames = 0;
+        std::uint64_t last_frame_id = 0;
+        ros::Time last_seen;
+        bool confirmed = false;
+    };
+
+    typedef std::unordered_map<VoxelKey, FrameVoxelStats, VoxelKeyHash>
+        FrameVoxelMap;
+    typedef std::unordered_map<VoxelKey, PersistentVoxel, VoxelKeyHash>
+        PersistentVoxelMap;
+
+    double cloud_cache_duration_;
+    double voxel_size_;
+    int min_points_per_voxel_;
+    int min_consecutive_frames_;
+    std::uint64_t frame_id_;
+    ros::Time last_cloud_stamp_;
+    PersistentVoxelMap persistent_voxels_;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_world_cloud_;
 
 public:
     LivoxToWorldTransformer()
@@ -55,7 +111,8 @@ public:
           odom_sub_(nullptr),
           sync_(nullptr),
           sensor_to_body_(Eigen::Matrix3d::Identity()),
-          sensor_translation_(Eigen::Vector3d::Zero())
+          sensor_translation_(Eigen::Vector3d::Zero()),
+          frame_id_(0)
     {
         nh_.param<std::string>("livox_topic", livox_topic_, "/livox/lidar");
         nh_.param<std::string>("odom_topic", odom_topic_,
@@ -77,6 +134,16 @@ public:
         nh_.param<double>("self_filter_y", self_filter_y_, 0.7);
         nh_.param<double>("self_filter_z", self_filter_z_, 0.5);
 
+        nh_.param<double>("cloud_cache_duration", cloud_cache_duration_, 0.8);
+        nh_.param<double>("voxel_size", voxel_size_, 0.25);
+        nh_.param<int>("min_points_per_voxel", min_points_per_voxel_, 2);
+        nh_.param<int>("min_consecutive_frames", min_consecutive_frames_, 3);
+
+        cloud_cache_duration_ = std::max(0.1, cloud_cache_duration_);
+        voxel_size_ = std::max(0.05, voxel_size_);
+        min_points_per_voxel_ = std::max(1, min_points_per_voxel_);
+        min_consecutive_frames_ = std::max(1, min_consecutive_frames_);
+
         constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
         const Eigen::AngleAxisd roll(roll_deg * kDegToRad,
                                      Eigen::Vector3d::UnitX());
@@ -88,8 +155,8 @@ public:
         sensor_to_body_ = (yaw * pitch * roll).toRotationMatrix();
         sensor_translation_ = Eigen::Vector3d(lidar_x, lidar_y, lidar_z);
 
-        accumulated_world_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>());
-        accumulated_world_cloud_->reserve(MAX_BUFFER_SIZE);
+        filtered_world_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>());
+        filtered_world_cloud_->reserve(50000);
 
         world_cloud_pub_ =
             nh_.advertise<sensor_msgs::PointCloud2>("/world_cloud", 10);
@@ -118,6 +185,9 @@ public:
         ROS_INFO("  Self filter: %s box=(%.2f, %.2f, %.2f)",
                  self_filter_enabled_ ? "enabled" : "disabled",
                  self_filter_x_, self_filter_y_, self_filter_z_);
+        ROS_INFO("  Cloud filter: cache=%.2fs voxel=%.2fm min_points=%d min_frames=%d",
+                 cloud_cache_duration_, voxel_size_, min_points_per_voxel_,
+                 min_consecutive_frames_);
     }
 
     ~LivoxToWorldTransformer()
@@ -127,24 +197,113 @@ public:
         delete sync_;
     }
 
-    void addToWorldBuffer(
-        const pcl::PointCloud<pcl::PointXYZ>::Ptr &world_cloud)
+    VoxelKey pointToVoxel(const pcl::PointXYZ &point) const
     {
-        *accumulated_world_cloud_ += *world_cloud;
+        VoxelKey key;
+        key.x = static_cast<int>(std::floor(point.x / voxel_size_));
+        key.y = static_cast<int>(std::floor(point.y / voxel_size_));
+        key.z = static_cast<int>(std::floor(point.z / voxel_size_));
+        return key;
+    }
 
-        if (accumulated_world_cloud_->size() > MAX_BUFFER_SIZE)
+    void updateFilteredWorldCloud(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr &current_world,
+        const ros::Time &cloud_stamp)
+    {
+        ros::Time stamp = cloud_stamp;
+        if (stamp.isZero())
         {
-            const std::size_t remove_count =
-                accumulated_world_cloud_->size() - MAX_BUFFER_SIZE;
-            accumulated_world_cloud_->points.erase(
-                accumulated_world_cloud_->points.begin(),
-                accumulated_world_cloud_->points.begin() + remove_count);
+            stamp = ros::Time::now();
         }
 
-        accumulated_world_cloud_->width =
-            static_cast<std::uint32_t>(accumulated_world_cloud_->size());
-        accumulated_world_cloud_->height = 1;
-        accumulated_world_cloud_->is_dense = true;
+        // bag 回放或时钟回退时清空状态，避免把上一段时间的障碍带入新地图。
+        if (!last_cloud_stamp_.isZero() && stamp < last_cloud_stamp_)
+        {
+            persistent_voxels_.clear();
+            frame_id_ = 0;
+        }
+        last_cloud_stamp_ = stamp;
+        ++frame_id_;
+
+        // 每帧先做体素统计，同一体素内的多个激光点只保留一个质心。
+        FrameVoxelMap frame_voxels;
+        frame_voxels.reserve(current_world->size());
+        for (const pcl::PointXYZ &point : current_world->points)
+        {
+            FrameVoxelStats &stats = frame_voxels[pointToVoxel(point)];
+            stats.sum_x += point.x;
+            stats.sum_y += point.y;
+            stats.sum_z += point.z;
+            ++stats.point_count;
+        }
+
+        std::size_t qualified_voxels = 0;
+        for (const auto &entry : frame_voxels)
+        {
+            const FrameVoxelStats &stats = entry.second;
+            if (stats.point_count < min_points_per_voxel_)
+            {
+                continue;
+            }
+
+            ++qualified_voxels;
+            PersistentVoxel &state = persistent_voxels_[entry.first];
+            if (state.last_frame_id + 1 == frame_id_)
+            {
+                ++state.consecutive_frames;
+            }
+            else
+            {
+                state.consecutive_frames = 1;
+            }
+
+            const double count = static_cast<double>(stats.point_count);
+            state.x = stats.sum_x / count;
+            state.y = stats.sum_y / count;
+            state.z = stats.sum_z / count;
+            state.last_frame_id = frame_id_;
+            state.last_seen = stamp;
+            if (state.consecutive_frames >= min_consecutive_frames_)
+            {
+                state.confirmed = true;
+            }
+        }
+
+        // 只发布已连续确认的体素；确认后最多保留短时间，不再无条件累计 100000 个历史点。
+        filtered_world_cloud_->clear();
+        std::size_t confirmed_voxels = 0;
+        for (PersistentVoxelMap::iterator it = persistent_voxels_.begin();
+             it != persistent_voxels_.end();)
+        {
+            const double age = (stamp - it->second.last_seen).toSec();
+            if (age > cloud_cache_duration_)
+            {
+                it = persistent_voxels_.erase(it);
+                continue;
+            }
+
+            if (it->second.confirmed)
+            {
+                pcl::PointXYZ point;
+                point.x = static_cast<float>(it->second.x);
+                point.y = static_cast<float>(it->second.y);
+                point.z = static_cast<float>(it->second.z);
+                filtered_world_cloud_->push_back(point);
+                ++confirmed_voxels;
+            }
+            ++it;
+        }
+
+        filtered_world_cloud_->width =
+            static_cast<std::uint32_t>(filtered_world_cloud_->size());
+        filtered_world_cloud_->height = 1;
+        filtered_world_cloud_->is_dense = true;
+
+        ROS_INFO_THROTTLE(
+            1.0,
+            "World cloud filter: current=%zu frame_voxels=%zu qualified=%zu confirmed=%zu",
+            current_world->size(), frame_voxels.size(), qualified_voxels,
+            confirmed_voxels);
     }
 
     void callback(const livox_ros_driver2::CustomMsg::ConstPtr &livox_msg,
@@ -204,20 +363,18 @@ public:
         current_world->height = 1;
         current_world->is_dense = true;
 
-        // Important: transform this scan with its own synchronized pose
-        // before adding it to the world buffer.
-        addToWorldBuffer(current_world);
+        updateFilteredWorldCloud(current_world, livox_msg->header.stamp);
 
         sensor_msgs::PointCloud2 output_msg;
-        pcl::toROSMsg(*accumulated_world_cloud_, output_msg);
+        pcl::toROSMsg(*filtered_world_cloud_, output_msg);
         output_msg.header.stamp = livox_msg->header.stamp;
         output_msg.header.frame_id = output_frame_;
         world_cloud_pub_.publish(output_msg);
 
         ROS_INFO_THROTTLE(
             1.0,
-            "Published world cloud: current=%zu buffered=%zu frame=%s",
-            current_world->size(), accumulated_world_cloud_->size(),
+            "Published world cloud: current=%zu filtered=%zu frame=%s",
+            current_world->size(), filtered_world_cloud_->size(),
             output_frame_.c_str());
     }
 };
