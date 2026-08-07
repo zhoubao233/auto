@@ -1,5 +1,6 @@
 #include "bspline_opt/bspline_optimizer.h"
 #include "bspline_opt/gradient_descent_optimizer.h"
+#include <cmath>
 // using namespace std;
 
 namespace ego_planner
@@ -1454,9 +1455,9 @@ namespace ego_planner
   bool BsplineOptimizer::rebound_optimize(double &final_cost)
   {
     iter_num_ = 0;
-    int start_id = order_;
-    // int end_id = this->cps_.size - order_; //Fixed end
-    int end_id = this->cps_.size; // Free end
+    const int start_id = order_;
+    // Preserve terminal position/velocity/acceleration only for stopping targets.
+    const int end_id = fix_end_ ? this->cps_.size - order_ : this->cps_.size;
     variable_num_ = 3 * (end_id - start_id);
 
     ros::Time t0 = ros::Time::now(), t1, t2;
@@ -1492,12 +1493,38 @@ namespace ego_planner
       double time_ms = (t2 - t1).toSec() * 1000;
       double total_time_ms = (t2 - t0).toSec() * 1000;
 
-      /* ---------- success temporary, check collision again ---------- */
-      if (result == lbfgs::LBFGS_CONVERGENCE ||
+      const bool solver_reported_rounding =
+          result == lbfgs::LBFGSERR_ROUNDING_ERROR;
+      bool candidate_finite = std::isfinite(final_cost);
+      for (int i = 0; i < variable_num_ && candidate_finite; ++i)
+      {
+        candidate_finite = std::isfinite(q[i]);
+      }
+
+      const bool solver_returned_candidate =
+          result == lbfgs::LBFGS_CONVERGENCE ||
           result == lbfgs::LBFGSERR_MAXIMUMITERATION ||
           result == lbfgs::LBFGS_ALREADY_MINIMIZED ||
-          result == lbfgs::LBFGS_STOP)
+          result == lbfgs::LBFGS_STOP ||
+          solver_reported_rounding;
+
+      /* ---------- success temporary, check collision again ---------- */
+      if (solver_returned_candidate && candidate_finite)
       {
+        // More-Thuente restores q to its last accepted point when a line search
+        // ends with LBFGSERR_ROUNDING_ERROR. The cost callback may still have
+        // left cps_.points at the rejected trial point, so restore q before the
+        // normal collision and feasibility validation below.
+        memcpy(cps_.points.data() + 3 * start_id, q,
+               variable_num_ * sizeof(q[0]));
+        enforcePlanarLock();
+
+        if (solver_reported_rounding)
+        {
+          ROS_WARN("L-BFGS line search reached rounding tolerance; validate the "
+                   "last accepted candidate instead of forcing a random retry.");
+        }
+
         //ROS_WARN("Solver error in planning!, return = %s", lbfgs::lbfgs_strerror(result));
         flag_force_return = false;
 
@@ -1601,6 +1628,12 @@ namespace ego_planner
 
           printf("\033[32miter(+1)=%d,time(ms)=%5.3f, collided, keep optimizing\n\033[0m", iter_num_, time_ms);
         }
+      }
+      else if (solver_reported_rounding)
+      {
+        ROS_WARN("L-BFGS rounding candidate contains a non-finite value; "
+                 "reject this planning attempt.");
+        success = false;
       }
       else if (result == lbfgs::LBFGSERR_CANCELED)
       {

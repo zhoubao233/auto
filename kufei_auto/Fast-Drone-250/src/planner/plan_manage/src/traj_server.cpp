@@ -196,8 +196,8 @@ void cmdCallback(const ros::TimerEvent &e)
     yaw_yawdot.first = last_yaw_;
     yaw_yawdot.second = 0;
 
+    // Keep publishing the terminal pose with zero velocity/acceleration.
     pos_f = pos;
-    return;
   }
   else
   {

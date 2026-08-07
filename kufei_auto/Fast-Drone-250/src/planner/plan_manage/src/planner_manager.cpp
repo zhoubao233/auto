@@ -91,7 +91,9 @@ namespace ego_planner
       local_target_vel(2) = 0.0;
     }
 
+    const bool stop_at_local_target = local_target_vel.norm() < 0.05;
     bspline_optimizer_->setPlanarMode(use_2d_astar_, planar_lock_z_);
+    bspline_optimizer_->setFixEnd(stop_at_local_target);
 
     if ((start_pt - local_target_pt).norm() < 0.2)
     {
@@ -367,6 +369,29 @@ namespace ego_planner
       {
         print_once = false;
         ROS_ERROR("IN SWARM MODE, REFINE DISABLED!");
+      }
+    }
+
+    if (stop_at_local_target)
+    {
+      const double end_time = pos.getTimeSum();
+      const Eigen::Vector3d terminal_position = pos.evaluateDeBoorT(end_time);
+      UniformBspline terminal_velocity_traj = pos.getDerivative();
+      UniformBspline terminal_acceleration_traj = terminal_velocity_traj.getDerivative();
+      const Eigen::Vector3d terminal_velocity = terminal_velocity_traj.evaluateDeBoorT(end_time);
+      const Eigen::Vector3d terminal_acceleration = terminal_acceleration_traj.evaluateDeBoorT(end_time);
+      const double terminal_position_error = (terminal_position - local_target_pt).norm();
+      constexpr double TERMINAL_POSITION_TOLERANCE = 0.20;
+      constexpr double TERMINAL_SPEED_TOLERANCE = 0.20;
+
+      if (terminal_position_error > TERMINAL_POSITION_TOLERANCE ||
+          terminal_velocity.norm() > TERMINAL_SPEED_TOLERANCE ||
+          terminal_acceleration.norm() > pp_.max_acc_ * (1.0 + pp_.feasibility_tolerance_) + 1e-3)
+      {
+        ROS_ERROR("Reject unsafe stopping trajectory: position_error=%.3f speed=%.3f acceleration=%.3f.",
+                  terminal_position_error, terminal_velocity.norm(), terminal_acceleration.norm());
+        continous_failures_count_++;
+        return false;
       }
     }
 

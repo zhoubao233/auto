@@ -25,6 +25,10 @@ namespace ego_planner
     nh.param("fsm/fail_safe", enable_fail_safe_, true);// 8. 读取“故障保护机制（Fail-Safe）开关” (若为 true，当丢失里程计定位信号或规划严重失败时，自动触发安全保护，防止坠机)
     nh.param("fsm/planning_enabled_on_start", planning_enabled_, true);// 9. 读取“启动时默认开启规划”
 
+    nh.param("fsm/goal_arrival_xy_tolerance", goal_arrival_xy_tolerance_, 0.4);
+    nh.param("fsm/goal_arrival_z_tolerance", goal_arrival_z_tolerance_, 0.3);
+    nh.param("fsm/goal_arrival_max_xy_speed", goal_arrival_max_xy_speed_, 0.3);
+    nh.param("fsm/goal_arrival_max_z_speed", goal_arrival_max_z_speed_, 0.15);
     have_trigger_ = !flag_realworld_experiment_;
 
     //预设航点读取
@@ -777,18 +781,41 @@ namespace ego_planner
       {
         if (t_cur > info->duration_ - 1e-2)
         {
-          have_target_ = false;
-          have_trigger_ = false;
+          const double xy_error = (odom_pos_.head<2>() - end_pt_.head<2>()).norm();
+          const double z_error = std::fabs(odom_pos_(2) - end_pt_(2));
+          const double xy_speed = odom_vel_.head<2>().norm();
+          const double z_speed = std::fabs(odom_vel_(2));
+          const bool actual_goal_reached =
+              xy_error <= goal_arrival_xy_tolerance_ &&
+              z_error <= goal_arrival_z_tolerance_ &&
+              xy_speed <= goal_arrival_max_xy_speed_ &&
+              z_speed <= goal_arrival_max_z_speed_;
 
-          if (target_type_ == TARGET_TYPE::PRESET_TARGET)
+          if (actual_goal_reached)
           {
-            wp_id_ = 0;
-            planNextWaypoint(wps_[wp_id_]);
+            have_target_ = false;
+            have_trigger_ = false;
+
+            if (target_type_ == TARGET_TYPE::PRESET_TARGET)
+            {
+              wp_id_ = 0;
+              planNextWaypoint(wps_[wp_id_]);
+            }
+
+            ROS_WARN("Trajectory finished and actual goal reached: xy=%.3f z=%.3f vxy=%.3f vz=%.3f.",
+                     xy_error, z_error, xy_speed, z_speed);
+            changeFSMExecState(WAIT_TARGET, "FSM");
+            goto force_return;
           }
 
-          changeFSMExecState(WAIT_TARGET, "FSM");
-          goto force_return;
-          // return;
+          ROS_WARN_THROTTLE(
+              1.0,
+              "Trajectory duration finished; keep publishing terminal hold until the aircraft settles "
+              "(xy=%.3f/%.3f z=%.3f/%.3f vxy=%.3f/%.3f vz=%.3f/%.3f).",
+              xy_error, goal_arrival_xy_tolerance_,
+              z_error, goal_arrival_z_tolerance_,
+              xy_speed, goal_arrival_max_xy_speed_,
+              z_speed, goal_arrival_max_z_speed_);
         }
         else if ((end_pt_ - pos).norm() > no_replan_thresh_ && t_cur > replan_thresh_)
         {
@@ -835,14 +862,22 @@ namespace ego_planner
     start_vel_ = odom_vel_;// 局部轨迹起点速度 = 当前飞机速度
     start_acc_.setZero();// 局部轨迹起点加速度 = 0
 
-    bool flag_random_poly_init;
-    if (timesOfConsecutiveStateCalls().first == 1)
-      flag_random_poly_init = false;// 第一次尝试：用确定性的标准初值
-    else
-      flag_random_poly_init = true;// 失败后的重试：开启随机扰动初值！
+    const bool retrying_previous_fsm_cycle =
+        timesOfConsecutiveStateCalls().first > 1;
 
     for (int i = 0; i < trial_times; i++)
     {
+      // Keep a fresh target deterministic on its first attempt. If that
+      // candidate genuinely fails safety validation, make later attempts
+      // distinct instead of repeating the same numerical failure ten times.
+      const bool flag_random_poly_init =
+          retrying_previous_fsm_cycle || i > 0;
+      if (flag_random_poly_init && i == 1 && !retrying_previous_fsm_cycle)
+      {
+        ROS_WARN("Deterministic B-spline candidate failed safety validation; "
+                 "enable a randomized obstacle-escape initialization.");
+      }
+
         // 调用 EGO-Planner 核心的 Rebound（反弹）重规划算法
         // 参数 1 (true)：代表这是基于全局轨迹进行的初始化规划
         // 参数 2 (flag_random_poly_init)：是否注入随机扰动

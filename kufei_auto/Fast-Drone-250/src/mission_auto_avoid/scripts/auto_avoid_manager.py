@@ -1763,6 +1763,7 @@ class AutoAvoidManager:
 
         if not self._fcu_auto_target_ready_for_avoidance(
             allow_takeoff_preplan=preplan_before_guided,
+            trigger=trigger,
             target=target,
         ):
             return
@@ -1858,7 +1859,12 @@ class AutoAvoidManager:
     def _guided_requests_allowed(self):
         return self.mode_select_flag is not None and self.mode_select_flag != 0
 
-    def _fcu_auto_target_ready_for_avoidance(self, allow_takeoff_preplan=False, target=None):
+    def _fcu_auto_target_ready_for_avoidance(
+        self,
+        allow_takeoff_preplan=False,
+        trigger="obstacle",
+        target=None,
+    ):
         if self.mission_source != "fcu":
             return True
 
@@ -1869,8 +1875,9 @@ class AutoAvoidManager:
         if str(current_mode).strip().upper() != str(self.auto_mode).strip().upper():
             rospy.loginfo_throttle(
                 1.0,
-                "mission_auto_avoid: obstacle detected, wait for FCU AUTO before GUIDED takeover "
-                "(current mode=%s).",
+                "mission_auto_avoid: wait for FCU AUTO before GUIDED takeover "
+                "(trigger=%s current mode=%s).",
+                str(trigger),
                 str(current_mode),
             )
             return False

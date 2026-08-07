@@ -379,7 +379,8 @@ inline void GridMap::indexToPos(const Eigen::Vector3i& id, Eigen::Vector3d& pos)
 }
 
 inline void GridMap::inflatePoint(const Eigen::Vector3i& pt, int step, vector<Eigen::Vector3i>& pts) {
-  int num = 0;
+  pts.clear();
+  const int radius_squared = step * step;
 
   /* ---------- + shape inflate ---------- */
   // for (int x = -step; x <= step; ++x)
@@ -399,12 +400,17 @@ inline void GridMap::inflatePoint(const Eigen::Vector3i& pt, int step, vector<Ei
   //   pts[num++] = Eigen::Vector3i(pt(0), pt(1), pt(2) + z);
   // }
 
-  /* ---------- all inflate ---------- */
-  for (int x = -step; x <= step; ++x)
-    for (int y = -step; y <= step; ++y)
-      for (int z = -step; z <= step; ++z) {
-        pts[num++] = Eigen::Vector3i(pt(0) + x, pt(1) + y, pt(2) + z);
+  /* ---------- cylindrical inflate: circular XY, unchanged Z ---------- */
+  for (int x = -step; x <= step; ++x) {
+    for (int y = -step; y <= step; ++y) {
+      if (x * x + y * y > radius_squared) {
+        continue;
       }
+      for (int z = -step; z <= step; ++z) {
+        pts.emplace_back(pt(0) + x, pt(1) + y, pt(2) + z);
+      }
+    }
+  }
 }
 
 inline double GridMap::getResolution() { return mp_.resolution_; }

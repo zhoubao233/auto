@@ -58,6 +58,8 @@ namespace ego_planner
     /* parameters */
     int target_type_; // 1 mannual select, 2 hard code
     double no_replan_thresh_, replan_thresh_;
+    double goal_arrival_xy_tolerance_, goal_arrival_z_tolerance_;
+    double goal_arrival_max_xy_speed_, goal_arrival_max_z_speed_;
     double waypoints_[50][3];
     int waypoint_num_, wp_id_;
     double planning_horizen_, planning_horizen_time_;

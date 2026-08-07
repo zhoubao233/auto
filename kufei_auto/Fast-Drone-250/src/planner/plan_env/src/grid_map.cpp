@@ -666,7 +666,8 @@ void GridMap::clearAndInflateLocalMap()
 
   int inf_step = ceil(mp_.obstacles_inflation_ / mp_.resolution_);
   // int inf_step_z = 1;
-  vector<Eigen::Vector3i> inf_pts(pow(2 * inf_step + 1, 3));
+  vector<Eigen::Vector3i> inf_pts;
+  inf_pts.reserve(pow(2 * inf_step + 1, 3));
   // inf_pts.resize(4 * inf_step + 3);
   Eigen::Vector3i inf_pt;
 
@@ -781,7 +782,8 @@ void GridMap::clearAndInflateLocalMap_d()
 
   int inf_step = ceil(mp_.obstacles_inflation_ / mp_.resolution_);
   // int inf_step_z = 1;
-  vector<Eigen::Vector3i> inf_pts(pow(2 * inf_step + 1, 3));
+  vector<Eigen::Vector3i> inf_pts;
+  inf_pts.reserve(pow(2 * inf_step + 1, 3));
   // inf_pts.resize(4 * inf_step + 3);
   Eigen::Vector3i inf_pt;
 
@@ -996,6 +998,9 @@ void GridMap::dronesPoseCallback(const sensor_msgs::PointCloud2ConstPtr& pose){
         for (int y = -inf_step; y <= inf_step; ++y)
           for (int z = 0; z <= inf_step_z; ++z)
           {
+            if (x * x + y * y > inf_step * inf_step)
+              continue;
+
 
             p3d_inf(0) = pt.x + x * mp_.resolution_;
             p3d_inf(1) = pt.y + y * mp_.resolution_;
@@ -1096,6 +1101,9 @@ void GridMap::cloudCallback(const sensor_msgs::PointCloud2ConstPtr &img)
         for (int y = -inf_step; y <= inf_step; ++y)
           for (int z = -inf_step_z; z <= inf_step_z; ++z)
           {
+            if (x * x + y * y > inf_step * inf_step)
+              continue;
+
 
             p3d_inf(0) = pt.x + x * mp_.resolution_;
             p3d_inf(1) = pt.y + y * mp_.resolution_;

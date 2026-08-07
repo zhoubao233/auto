@@ -114,7 +114,8 @@ namespace ego_planner
     void setGuidePath(const vector<Eigen::Vector3d> &guide_pt);
     void setWaypoints(const vector<Eigen::Vector3d> &waypts,
                       const vector<int> &waypt_idx); // N-2 constraints at most
-    void setLocalTargetPt(const Eigen::Vector3d local_target_pt) { local_target_pt_ = local_target_pt; };
+    void setLocalTargetPt(const Eigen::Vector3d local_target_pt) { local_target_pt_ = local_target_pt; }
+    void setFixEnd(bool fix_end) { fix_end_ = fix_end; }
 
     void optimize();
 
@@ -183,6 +184,7 @@ namespace ego_planner
 
     ControlPoints cps_;
     bool use_planar_lock_{false};
+    bool fix_end_{false};
     double planar_lock_z_{0.0};
 
     void enforcePlanarLock();
